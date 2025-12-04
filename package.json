@@ -3,9 +3,9 @@
   "displayName": "Terminal AI Namer",
   "description": "AI-powered terminal naming - automatically generate meaningful terminal names based on executed commands",
   "version": "0.1.0",
-  "publisher": "zhuanz",
+  "publisher": "lif",
   "author": {
-    "name": "zhuanz"
+    "name": "lif"
   },
   "license": "MIT",
   "icon": "resources/icon.png",

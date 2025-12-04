@@ -1,59 +1,59 @@
 # Terminal AI Namer
 
-智能终端命名工具 - 使用 AI 根据终端执行的命令自动生成有意义的终端名称。
+AI-powered terminal naming tool - automatically generate meaningful terminal names based on executed commands.
 
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/zhuanz.terminal-ai-namer)](https://marketplace.visualstudio.com/items?itemName=zhuanz.terminal-ai-namer)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/lif.terminal-ai-namer)](https://marketplace.visualstudio.com/items?itemName=lif.terminal-ai-namer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 功能特性
+## Features
 
-- **智能命名**: 基于终端执行的命令，AI 自动生成简洁有意义的名称
-- **多 AI 支持**: 支持 OpenRouter、OpenAI、Claude、Ollama 多种 AI 服务
-- **使用统计**: 实时追踪 Token 用量和费用
-- **侧边栏面板**: 快速查看和管理所有终端
-- **自动/手动**: 可配置自动命名或手动触发
+- **Smart Naming**: AI automatically generates concise, meaningful names based on terminal commands
+- **Multiple AI Providers**: Supports OpenRouter, OpenAI, Claude, and Ollama
+- **Usage Statistics**: Real-time tracking of token usage and costs
+- **Sidebar Panel**: Quickly view and manage all terminals
+- **Auto/Manual Mode**: Configurable automatic naming or manual trigger
 
-## 演示
+## Demo
 
-执行命令后，终端自动获得有意义的名称：
+After executing commands, terminals automatically get meaningful names:
 
-| 命令 | 生成名称 |
-|------|----------|
-| `kubectl get pods` | K8s监控 |
-| `npm run dev` | 前端开发 |
-| `docker compose up` | Docker服务 |
-| `ssh root@prod-server` | SSH生产 |
-| `python train.py` | 模型训练 |
+| Command | Generated Name |
+|---------|----------------|
+| `kubectl get pods` | K8s-Monitor |
+| `npm run dev` | Frontend-Dev |
+| `docker compose up` | Docker-Service |
+| `ssh root@prod-server` | SSH-Prod |
+| `python train.py` | ML-Training |
 
-## 安装
+## Installation
 
-1. 打开 VS Code
-2. 按 `Ctrl+Shift+X` 打开扩展面板
-3. 搜索 "Terminal AI Namer"
-4. 点击安装
+1. Open VS Code
+2. Press `Ctrl+Shift+X` to open Extensions panel
+3. Search for "Terminal AI Namer"
+4. Click Install
 
-或通过命令行安装：
+Or install via command line:
 
 ```bash
-code --install-extension zhuanz.terminal-ai-namer
+code --install-extension lif.terminal-ai-namer
 ```
 
-## 配置
+## Configuration
 
-### 1. 获取 API Key
+### 1. Get API Key
 
-推荐使用 [OpenRouter](https://openrouter.ai/keys)（支持多种模型，按量付费）。
+We recommend [OpenRouter](https://openrouter.ai/keys) (supports multiple models, pay-per-use).
 
-也支持：
+Also supports:
 - [OpenAI](https://platform.openai.com/api-keys)
 - [Claude](https://console.anthropic.com/account/keys)
-- [Ollama](https://ollama.ai/)（本地免费）
+- [Ollama](https://ollama.ai/) (local, free)
 
-### 2. 配置扩展
+### 2. Configure Extension
 
-点击侧边栏的终端图标，在设置面板中输入 API Key。
+Click the terminal icon in the sidebar and enter your API Key in the settings panel.
 
-或通过 VS Code 设置：
+Or configure via VS Code settings:
 
 ```json
 {
@@ -62,76 +62,76 @@ code --install-extension zhuanz.terminal-ai-namer
   "terminalAiNamer.openrouterModel": "google/gemini-2.5-flash",
   "terminalAiNamer.autoRename": true,
   "terminalAiNamer.commandThreshold": 3,
-  "terminalAiNamer.language": "zh"
+  "terminalAiNamer.language": "en"
 }
 ```
 
-## 配置选项
+## Configuration Options
 
-| 选项 | 说明 | 默认值 |
-|------|------|--------|
-| `provider` | AI 服务提供商 | `openrouter` |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `provider` | AI service provider | `openrouter` |
 | `openrouterApiKey` | OpenRouter API Key | - |
-| `openrouterModel` | OpenRouter 模型 | `google/gemini-2.5-flash` |
+| `openrouterModel` | OpenRouter model | `google/gemini-2.5-flash` |
 | `openaiApiKey` | OpenAI API Key | - |
 | `claudeApiKey` | Claude API Key | - |
-| `ollamaEndpoint` | Ollama 服务地址 | `http://localhost:11434` |
-| `ollamaModel` | Ollama 模型名称 | `llama3.2` |
-| `autoRename` | 自动命名终端 | `true` |
-| `commandThreshold` | 触发命名的命令数 | `3` |
-| `language` | 命名语言 (zh/en) | `zh` |
+| `ollamaEndpoint` | Ollama service URL | `http://localhost:11434` |
+| `ollamaModel` | Ollama model name | `llama3.2` |
+| `autoRename` | Auto rename terminals | `true` |
+| `commandThreshold` | Commands before auto-rename | `3` |
+| `language` | Naming language (zh/en) | `zh` |
 
-## 推荐模型
+## Recommended Models
 
-| 模型 | 特点 | 价格 |
-|------|------|------|
-| `google/gemini-2.5-flash` | 快速智能（推荐） | $0.30/1M tokens |
-| `google/gemini-2.5-pro` | 最强 | $1.25/1M tokens |
-| `google/gemini-2.0-flash-001` | 便宜 | $0.10/1M tokens |
-| `anthropic/claude-3-haiku` | 快速稳定 | $0.25/1M tokens |
-| `openai/gpt-4o-mini` | 性价比高 | $0.15/1M tokens |
+| Model | Features | Price |
+|-------|----------|-------|
+| `google/gemini-2.5-flash` | Fast & smart (Recommended) | $0.30/1M tokens |
+| `google/gemini-2.5-pro` | Most powerful | $1.25/1M tokens |
+| `google/gemini-2.0-flash-001` | Budget-friendly | $0.10/1M tokens |
+| `anthropic/claude-3-haiku` | Fast & stable | $0.25/1M tokens |
+| `openai/gpt-4o-mini` | Cost-effective | $0.15/1M tokens |
 
-## 使用方法
+## Usage
 
-### 自动命名
+### Auto Naming
 
-1. 打开终端
-2. 执行 3 条命令（可配置）
-3. AI 自动生成名称
+1. Open a terminal
+2. Execute 3 commands (configurable)
+3. AI automatically generates a name
 
-### 手动命名
+### Manual Naming
 
-- 命令面板: `Terminal AI Namer: 重命名当前终端`
-- 侧边栏: 点击终端旁的 ✨ 图标
+- Command Palette: `Terminal AI Namer: Rename Current Terminal`
+- Sidebar: Click the ✨ icon next to the terminal
 
-### 查看统计
+### View Statistics
 
-- 状态栏显示今日 Token 用量和费用
-- 侧边栏设置面板查看详细统计
+- Status bar shows today's token usage and cost
+- Sidebar settings panel shows detailed statistics
 
-## 命令
+## Commands
 
-| 命令 | 说明 |
-|------|------|
-| `Terminal AI Namer: 重命名当前终端` | 重命名当前活动终端 |
-| `Terminal AI Namer: 重命名所有终端` | 重命名所有有命令历史的终端 |
-| `Terminal AI Namer: 打开设置` | 打开完整设置面板 |
+| Command | Description |
+|---------|-------------|
+| `Terminal AI Namer: Rename Current Terminal` | Rename the active terminal |
+| `Terminal AI Namer: Rename All Terminals` | Rename all terminals with command history |
+| `Terminal AI Namer: Open Settings` | Open full settings panel |
 
-## 要求
+## Requirements
 
-- VS Code 1.85.0 或更高版本
-- 需要 AI 服务的 API Key（Ollama 本地运行除外）
+- VS Code 1.85.0 or higher
+- API Key for AI service (except Ollama running locally)
 
-## 隐私说明
+## Privacy
 
-- 仅发送终端命令到您配置的 AI 服务
-- 不收集任何用户数据
-- 所有配置存储在本地
+- Only sends terminal commands to your configured AI service
+- Does not collect any user data
+- All settings stored locally
 
-## 问题反馈
+## Feedback
 
-如有问题或建议，请在 [GitHub Issues](https://github.com/majiayu000/terminal-namer-vs-plugin/issues) 提交。
+For issues or suggestions, please submit on [GitHub Issues](https://github.com/majiayu000/terminal-namer-vs-plugin/issues).
 
-## 许可证
+## License
 
 [MIT](LICENSE)
