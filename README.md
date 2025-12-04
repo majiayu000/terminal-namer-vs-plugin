@@ -59,7 +59,7 @@ code --install-extension zhuanz.terminal-ai-namer
 {
   "terminalAiNamer.provider": "openrouter",
   "terminalAiNamer.openrouterApiKey": "your-api-key",
-  "terminalAiNamer.openrouterModel": "google/gemini-2.0-flash-001",
+  "terminalAiNamer.openrouterModel": "google/gemini-2.5-flash",
   "terminalAiNamer.autoRename": true,
   "terminalAiNamer.commandThreshold": 3,
   "terminalAiNamer.language": "zh"
@@ -72,7 +72,7 @@ code --install-extension zhuanz.terminal-ai-namer
 |------|------|--------|
 | `provider` | AI 服务提供商 | `openrouter` |
 | `openrouterApiKey` | OpenRouter API Key | - |
-| `openrouterModel` | OpenRouter 模型 | `google/gemini-2.0-flash-001` |
+| `openrouterModel` | OpenRouter 模型 | `google/gemini-2.5-flash` |
 | `openaiApiKey` | OpenAI API Key | - |
 | `claudeApiKey` | Claude API Key | - |
 | `ollamaEndpoint` | Ollama 服务地址 | `http://localhost:11434` |
@@ -85,8 +85,9 @@ code --install-extension zhuanz.terminal-ai-namer
 
 | 模型 | 特点 | 价格 |
 |------|------|------|
-| `google/gemini-2.0-flash-001` | 快速便宜（推荐） | $0.10/1M tokens |
-| `google/gemini-2.5-pro-preview` | 最新最强 | $1.25/1M tokens |
+| `google/gemini-2.5-flash` | 快速智能（推荐） | $0.30/1M tokens |
+| `google/gemini-2.5-pro` | 最强 | $1.25/1M tokens |
+| `google/gemini-2.0-flash-001` | 便宜 | $0.10/1M tokens |
 | `anthropic/claude-3-haiku` | 快速稳定 | $0.25/1M tokens |
 | `openai/gpt-4o-mini` | 性价比高 | $0.15/1M tokens |
 
@@ -129,7 +130,7 @@ code --install-extension zhuanz.terminal-ai-namer
 
 ## 问题反馈
 
-如有问题或建议，请在 [GitHub Issues](https://github.com/zhuanz/terminal-ai-namer/issues) 提交。
+如有问题或建议，请在 [GitHub Issues](https://github.com/majiayu000/terminal-namer-vs-plugin/issues) 提交。
 
 ## 许可证
 

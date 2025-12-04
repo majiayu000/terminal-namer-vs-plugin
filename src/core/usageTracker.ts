@@ -6,10 +6,10 @@ import * as vscode from 'vscode';
  * 使用 LiteLLM 标准定价格式：input_cost_per_token, output_cost_per_token
  */
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  // OpenRouter - Gemini (via LiteLLM openrouter/ prefix)
+  // OpenRouter - Gemini (via LiteLLM)
+  'google/gemini-2.5-flash': { input: 3e-7, output: 2.5e-6 },
+  'google/gemini-2.5-pro': { input: 1.25e-6, output: 1e-5 },
   'google/gemini-2.0-flash-001': { input: 1e-7, output: 4e-7 },
-  'google/gemini-2.5-pro-preview': { input: 1.25e-6, output: 1e-5 },
-  'google/gemini-2.5-flash': { input: 3e-7, output: 1e-6 },
   'google/gemini-flash-1.5': { input: 7.5e-8, output: 3e-7 },
   'google/gemini-pro-1.5': { input: 2.5e-6, output: 7.5e-6 },
 
@@ -126,8 +126,8 @@ export class UsageTracker {
    * 计算费用（使用 LiteLLM 标准：cost_per_token）
    */
   private calculateCost(model: string, promptTokens: number, completionTokens: number): number {
-    // 默认使用 Gemini 2.0 Flash 的价格
-    const defaultPricing = { input: 1e-7, output: 4e-7 };
+    // 默认使用 Gemini 2.5 Flash 的价格
+    const defaultPricing = { input: 3e-7, output: 2.5e-6 };
     const pricing = MODEL_PRICING[model] || defaultPricing;
 
     // LiteLLM 格式：价格已经是每 token

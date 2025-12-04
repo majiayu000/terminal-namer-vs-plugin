@@ -4,7 +4,7 @@ export class OpenRouterProvider implements AIProvider {
   private apiKey: string;
   private model: string;
 
-  constructor(apiKey: string, model: string = 'google/gemini-2.0-flash-001') {
+  constructor(apiKey: string, model: string = 'google/gemini-2.5-flash') {
     this.apiKey = apiKey;
     this.model = model;
   }

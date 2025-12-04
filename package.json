@@ -11,11 +11,11 @@
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zhuanz/terminal-ai-namer"
+    "url": "https://github.com/majiayu000/terminal-namer-vs-plugin"
   },
-  "homepage": "https://github.com/zhuanz/terminal-ai-namer#readme",
+  "homepage": "https://github.com/majiayu000/terminal-namer-vs-plugin#readme",
   "bugs": {
-    "url": "https://github.com/zhuanz/terminal-ai-namer/issues"
+    "url": "https://github.com/majiayu000/terminal-namer-vs-plugin/issues"
   },
   "keywords": [
     "terminal",
@@ -153,10 +153,11 @@
         },
         "terminalAiNamer.openrouterModel": {
           "type": "string",
-          "default": "google/gemini-2.0-flash-001",
+          "default": "google/gemini-2.5-flash",
           "enum": [
+            "google/gemini-2.5-flash",
+            "google/gemini-2.5-pro",
             "google/gemini-2.0-flash-001",
-            "google/gemini-2.5-pro-preview",
             "anthropic/claude-3-haiku",
             "anthropic/claude-3.5-sonnet",
             "openai/gpt-4o-mini",
@@ -164,8 +165,9 @@
             "meta-llama/llama-3.1-8b-instruct"
           ],
           "enumDescriptions": [
-            "Gemini 2.0 Flash - 快速便宜（推荐）",
-            "Gemini 2.5 Pro - 最新最强",
+            "Gemini 2.5 Flash - 快速智能（推荐）",
+            "Gemini 2.5 Pro - 最强",
+            "Gemini 2.0 Flash - 便宜",
             "Claude 3 Haiku - 快速",
             "Claude 3.5 Sonnet - 高质量",
             "GPT-4o Mini - 快速",

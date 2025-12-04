@@ -42,7 +42,7 @@ export function createProvider(): AIProvider {
       if (!apiKey) {
         throw new Error('请先配置 OpenRouter API Key');
       }
-      const model = config.get<string>('openrouterModel', 'google/gemini-2.0-flash-001');
+      const model = config.get<string>('openrouterModel', 'google/gemini-2.5-flash');
       return new OpenRouterProvider(apiKey, model);
     }
 

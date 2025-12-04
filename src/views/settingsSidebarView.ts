@@ -87,7 +87,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       settings: {
         provider: config.get('provider', 'openrouter'),
         openrouterApiKey: config.get('openrouterApiKey', ''),
-        openrouterModel: config.get('openrouterModel', 'google/gemini-2.0-flash-001'),
+        openrouterModel: config.get('openrouterModel', 'google/gemini-2.5-flash'),
         autoRename: config.get('autoRename', true),
         commandThreshold: config.get('commandThreshold', 3),
         language: config.get('language', 'zh')
@@ -267,8 +267,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     <div class="form-group" id="modelGroup">
       <label>Model</label>
       <select id="model">
-        <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (Recommended)</option>
-        <option value="google/gemini-2.5-pro-preview">Gemini 2.5 Pro</option>
+        <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (Recommended)</option>
+        <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+        <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
         <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
         <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
         <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
