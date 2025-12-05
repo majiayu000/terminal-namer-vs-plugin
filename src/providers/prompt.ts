@@ -2,9 +2,9 @@
  * 构建 AI 提示词
  *
  * 设计原则：
- * 1. 补全式格式 - 让模型自然补全，而非生成解释
- * 2. 命令组 → 单一名称 - 明确多命令生成一个名称
- * 3. 等号结尾 - 引导模型直接输出答案
+ * 1. 提取具体信息 - 服务名、环境、目标等，而非泛泛分类
+ * 2. AI 的价值在于理解上下文，不是关键词匹配
+ * 3. 名称应该有辨识度，能区分不同终端
  */
 export interface PromptMessages {
   system: string;
@@ -14,34 +14,35 @@ export interface PromptMessages {
 export function buildPrompt(commands: string[], language: 'zh' | 'en'): PromptMessages {
   // 去重并限制命令数量
   const uniqueCommands = [...new Set(commands)].slice(0, 5);
-  const commandStr = uniqueCommands.join(', ');
+  const commandStr = uniqueCommands.join('\n');
 
   const systemPrompt = language === 'zh'
-    ? `终端命名(2-5字),只输出名称:
-kubectl get pods = K8s监控
-npm install, npm run dev = 前端开发
-npm run build = 项目构建
-ls, cd, pwd = 文件浏览
-docker compose up = Docker
-claude, ccusage = Claude工具
-git add, git commit = Git提交
-python train.py = 模型训练
-ssh root@server = SSH连接
-ping, curl = 网络测试`
-    : `Terminal naming(1-3 words),output name only:
-kubectl get pods = K8s-Monitor
-npm install, npm run dev = Frontend-Dev
-npm run build = Build
-ls, cd, pwd = Files
-docker compose up = Docker
-claude, ccusage = Claude-Tools
-git add, git commit = Git-Commit
-python train.py = ML-Training
-ssh root@server = SSH
-ping, curl = Network-Test`;
+    ? `为终端生成简短名称(2-5字)。提取命令中的具体信息(服务名/环境/目标),不要泛泛分类。只输出名称。
 
-  // 用户消息以等号结尾，引导模型补全
-  const userPrompt = `${commandStr} =`;
+kubectl get pods -n payment → 支付Pod
+ssh deploy@staging-api → Staging部署
+npm run dev:admin → Admin开发
+docker logs nginx → Nginx日志
+git clone repo/user-svc → 用户服务
+python train.py --model=bert → Bert训练
+curl api.stripe.com → Stripe接口
+cd ~/blog && npm start → Blog启动
+pytest test_auth.py → 认证测试
+ls, pwd, cd → 文件浏览`
+    : `Generate short terminal name(1-3 words). Extract specific info(service/env/target), not generic categories. Output name only.
+
+kubectl get pods -n payment → Payment-Pods
+ssh deploy@staging-api → Staging-Deploy
+npm run dev:admin → Admin-Dev
+docker logs nginx → Nginx-Logs
+git clone repo/user-svc → User-Service
+python train.py --model=bert → Bert-Training
+curl api.stripe.com → Stripe-API
+cd ~/blog && npm start → Blog-Start
+pytest test_auth.py → Auth-Tests
+ls, pwd, cd → Files`;
+
+  const userPrompt = `${commandStr} →`;
 
   return { system: systemPrompt, user: userPrompt };
 }
@@ -57,14 +58,17 @@ export function cleanName(rawName: string, language: 'zh' | 'en'): string {
   name = name.replace(/\*/g, '');
   name = name.replace(/`/g, '');
 
+  // 如果包含箭头，取箭头后的部分
+  if (name.includes('→') || name.includes('->')) {
+    const parts = name.split(/[→]|->/).filter(Boolean);
+    name = parts[parts.length - 1].trim();
+  }
+
   // 如果包含等号，取等号后的部分
   if (name.includes('=')) {
     const parts = name.split('=');
     name = parts[parts.length - 1].trim();
   }
-
-  // 移除开头的等号
-  name = name.replace(/^[=\s]+/, '');
 
   // 移除引号
   name = name.replace(/^["'「」『』""]+|["'「」『』""]+$/g, '');
@@ -75,14 +79,6 @@ export function cleanName(rawName: string, language: 'zh' | 'en'): string {
   // 只取第一个逗号/分号前的内容
   name = name.split(/[,;，；]/)[0].trim();
 
-  // 移除解释性文字（如果有冒号，取冒号后的部分）
-  if (name.includes(':') || name.includes('：')) {
-    const parts = name.split(/[:：]/);
-    if (parts.length > 1 && parts[1].trim().length > 0) {
-      name = parts[parts.length - 1].trim();
-    }
-  }
-
   // 移除编号前缀
   name = name.replace(/^\d+[\.、\)\-]\s*/, '');
 
@@ -91,12 +87,6 @@ export function cleanName(rawName: string, language: 'zh' | 'en'): string {
 
   // 再次移除引号
   name = name.replace(/^["'「」『』""]+|["'「」『』""]+$/g, '');
-
-  // 如果还包含箭头，取箭头后的部分
-  if (name.includes('→') || name.includes('->')) {
-    const parts = name.split(/[→\->]+/);
-    name = parts[parts.length - 1].trim();
-  }
 
   // 移除括号及其内容（如果名称主体在括号外）
   const withoutParens = name.replace(/[（(][^）)]*[）)]/g, '').trim();
