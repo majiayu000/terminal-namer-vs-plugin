@@ -1,4 +1,4 @@
-import { AIProvider, GenerateResult, buildPrompt } from './base';
+import { AIProvider, GenerateResult, buildPrompt, cleanName } from './base';
 
 export class OllamaProvider implements AIProvider {
   private endpoint: string;
@@ -19,11 +19,12 @@ export class OllamaProvider implements AIProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        prompt: prompt,
+        system: prompt.system,
+        prompt: prompt.user,
         stream: false,
         options: {
-          num_predict: 50,
-          temperature: 0.7
+          num_predict: 20,
+          temperature: 0.3
         }
       })
     });
@@ -38,7 +39,8 @@ export class OllamaProvider implements AIProvider {
       eval_count?: number;
     };
 
-    const name = data.response?.trim() || '未命名终端';
+    const rawName = data.response || '';
+    const name = cleanName(rawName, language);
 
     return {
       name,

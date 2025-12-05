@@ -1,4 +1,4 @@
-import { AIProvider, GenerateResult, buildPrompt } from './base';
+import { AIProvider, GenerateResult, buildPrompt, cleanName } from './base';
 
 export class OpenRouterProvider implements AIProvider {
   private apiKey: string;
@@ -23,12 +23,11 @@ export class OpenRouterProvider implements AIProvider {
       body: JSON.stringify({
         model: this.model,
         messages: [
-          { role: 'user', content: prompt }
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: prompt.user }
         ],
-        max_tokens: 50,
-        temperature: 0.7,
-        // 请求包含 usage 信息
-        usage: { include: true }
+        max_tokens: 20,
+        temperature: 0.3
       })
     });
 
@@ -46,7 +45,8 @@ export class OpenRouterProvider implements AIProvider {
       };
     };
 
-    const name = data.choices[0]?.message?.content?.trim() || '未命名终端';
+    const rawName = data.choices[0]?.message?.content || '';
+    const name = cleanName(rawName, language);
 
     return {
       name,

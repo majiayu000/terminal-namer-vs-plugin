@@ -1,4 +1,4 @@
-import { AIProvider, GenerateResult, buildPrompt } from './base';
+import { AIProvider, GenerateResult, buildPrompt, cleanName } from './base';
 
 export class ClaudeProvider implements AIProvider {
   private apiKey: string;
@@ -20,9 +20,10 @@ export class ClaudeProvider implements AIProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        max_tokens: 50,
+        max_tokens: 20,
+        system: prompt.system,
         messages: [
-          { role: 'user', content: prompt }
+          { role: 'user', content: prompt.user }
         ]
       })
     });
@@ -39,7 +40,8 @@ export class ClaudeProvider implements AIProvider {
       };
     };
 
-    const name = data.content[0]?.text?.trim() || '未命名终端';
+    const rawName = data.content[0]?.text || '';
+    const name = cleanName(rawName, language);
 
     return {
       name,
