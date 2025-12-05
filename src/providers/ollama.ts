@@ -23,8 +23,8 @@ export class OllamaProvider implements AIProvider {
         prompt: prompt.user,
         stream: false,
         options: {
-          num_predict: 20,
-          temperature: 0.3
+          num_predict: 15,
+          temperature: 0.1
         }
       })
     });

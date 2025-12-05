@@ -1,5 +1,10 @@
 /**
  * 构建 AI 提示词
+ *
+ * 设计原则：
+ * 1. 补全式格式 - 让模型自然补全，而非生成解释
+ * 2. 命令组 → 单一名称 - 明确多命令生成一个名称
+ * 3. 等号结尾 - 引导模型直接输出答案
  */
 export interface PromptMessages {
   system: string;
@@ -7,27 +12,32 @@ export interface PromptMessages {
 }
 
 export function buildPrompt(commands: string[], language: 'zh' | 'en'): PromptMessages {
+  // 去重并限制命令数量
+  const uniqueCommands = [...new Set(commands)].slice(0, 5);
+  const commandStr = uniqueCommands.join(', ');
+
   const systemPrompt = language === 'zh'
-    ? `根据终端命令输出一个简短名称（2-5个字）。直接输出名称，禁止任何解释。
+    ? `终端命名(2-5字):
+kubectl get pods = K8s监控
+npm run dev = 前端开发
+ls, cd, pwd = 文件浏览
+docker compose up = Docker
+claude = Claude
+git status, git add = Git操作
+python train.py = 模型训练
+ssh root@server = SSH连接`
+    : `Terminal naming (1-3 words):
+kubectl get pods = K8s-Monitor
+npm run dev = Frontend-Dev
+ls, cd, pwd = Files
+docker compose up = Docker
+claude = Claude
+git status, git add = Git-Ops
+python train.py = ML-Training
+ssh root@server = SSH`;
 
-kubectl get pods → K8s监控
-npm run dev → 前端开发
-docker compose up → Docker
-git pull → Git更新
-ls → 文件浏览
-claude → Claude
-python app.py → Python`
-    : `Output a short name (1-3 words) for terminal commands. Output ONLY the name, no explanation.
-
-kubectl get pods → K8s-Monitor
-npm run dev → Frontend-Dev
-docker compose up → Docker
-git pull → Git-Pull
-ls → Files
-claude → Claude
-python app.py → Python`;
-
-  const userPrompt = commands.join(', ');
+  // 用户消息以等号结尾，引导模型补全
+  const userPrompt = `${commandStr} =`;
 
   return { system: systemPrompt, user: userPrompt };
 }
@@ -38,40 +48,57 @@ python app.py → Python`;
 export function cleanName(rawName: string, language: 'zh' | 'en'): string {
   let name = rawName.trim();
 
-  // 尝试提取箭头后的名称 (如 "命令 → 名称")
-  const arrowMatch = name.match(/[→\->]\s*["']?([^"'\n]+)["']?/);
-  if (arrowMatch) {
-    name = arrowMatch[1].trim();
-  }
+  // 移除开头的等号（如果模型重复了）
+  name = name.replace(/^[=\s]+/, '');
 
   // 移除引号
   name = name.replace(/^["'「」『』""]+|["'「」『』""]+$/g, '');
 
-  // 如果包含多行，只取第一行
+  // 只取第一行
   name = name.split('\n')[0].trim();
 
-  // 移除常见的解释性前缀
-  name = name.replace(/^(名称[：:]\s*|name[：:]\s*|建议[：:]\s*|推荐[：:]\s*)/i, '');
+  // 只取第一个逗号/分号前的内容
+  name = name.split(/[,;，；]/)[0].trim();
 
-  // 移除编号前缀如 "1. " 或 "1、"
-  name = name.replace(/^\d+[\.、\)]\s*/, '');
-
-  // 移除命令名前缀如 "claude → "
-  name = name.replace(/^[\w\-]+\s*[→\->]\s*/, '');
-
-  // 再次移除引号（清理后可能还有）
-  name = name.replace(/^["'「」『』""]+|["'「」『』""]+$/g, '');
-
-  // 限制长度
-  if (language === 'zh') {
-    if (name.length > 10) {
-      name = name.slice(0, 10);
-    }
-  } else {
-    if (name.length > 25) {
-      name = name.slice(0, 25);
+  // 移除解释性文字（如果有冒号，取冒号后的部分）
+  if (name.includes(':') || name.includes('：')) {
+    const parts = name.split(/[:：]/);
+    if (parts.length > 1 && parts[1].trim().length > 0) {
+      name = parts[parts.length - 1].trim();
     }
   }
 
-  return name || (language === 'zh' ? '终端' : 'Terminal');
+  // 移除编号前缀
+  name = name.replace(/^\d+[\.、\)\-]\s*/, '');
+
+  // 移除常见前缀
+  name = name.replace(/^(名称|name|建议|推荐|答案|output)[：:\s]*/i, '');
+
+  // 再次移除引号
+  name = name.replace(/^["'「」『』""]+|["'「」『』""]+$/g, '');
+
+  // 如果还包含箭头，取箭头后的部分
+  if (name.includes('→') || name.includes('->')) {
+    const parts = name.split(/[→\->]+/);
+    name = parts[parts.length - 1].trim();
+  }
+
+  // 移除括号及其内容（如果名称主体在括号外）
+  const withoutParens = name.replace(/[（(][^）)]*[）)]/g, '').trim();
+  if (withoutParens.length >= 2) {
+    name = withoutParens;
+  }
+
+  // 限制长度
+  const maxLen = language === 'zh' ? 10 : 25;
+  if (name.length > maxLen) {
+    name = name.slice(0, maxLen);
+  }
+
+  // 默认名称
+  if (!name || name.length < 1) {
+    return language === 'zh' ? '终端' : 'Terminal';
+  }
+
+  return name;
 }

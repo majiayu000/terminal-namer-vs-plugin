@@ -20,7 +20,7 @@ export class ClaudeProvider implements AIProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        max_tokens: 20,
+        max_tokens: 15,
         system: prompt.system,
         messages: [
           { role: 'user', content: prompt.user }

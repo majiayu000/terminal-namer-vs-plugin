@@ -26,8 +26,8 @@ export class OpenRouterProvider implements AIProvider {
           { role: 'system', content: prompt.system },
           { role: 'user', content: prompt.user }
         ],
-        max_tokens: 20,
-        temperature: 0.3
+        max_tokens: 15,
+        temperature: 0.1
       })
     });
 
