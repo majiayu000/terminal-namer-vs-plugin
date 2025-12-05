@@ -17,24 +17,28 @@ export function buildPrompt(commands: string[], language: 'zh' | 'en'): PromptMe
   const commandStr = uniqueCommands.join(', ');
 
   const systemPrompt = language === 'zh'
-    ? `终端命名(2-5字):
+    ? `终端命名(2-5字),只输出名称:
 kubectl get pods = K8s监控
-npm run dev = 前端开发
+npm install, npm run dev = 前端开发
+npm run build = 项目构建
 ls, cd, pwd = 文件浏览
 docker compose up = Docker
-claude = Claude
-git status, git add = Git操作
+claude, ccusage = Claude工具
+git add, git commit = Git提交
 python train.py = 模型训练
-ssh root@server = SSH连接`
-    : `Terminal naming (1-3 words):
+ssh root@server = SSH连接
+ping, curl = 网络测试`
+    : `Terminal naming(1-3 words),output name only:
 kubectl get pods = K8s-Monitor
-npm run dev = Frontend-Dev
+npm install, npm run dev = Frontend-Dev
+npm run build = Build
 ls, cd, pwd = Files
 docker compose up = Docker
-claude = Claude
-git status, git add = Git-Ops
+claude, ccusage = Claude-Tools
+git add, git commit = Git-Commit
 python train.py = ML-Training
-ssh root@server = SSH`;
+ssh root@server = SSH
+ping, curl = Network-Test`;
 
   // 用户消息以等号结尾，引导模型补全
   const userPrompt = `${commandStr} =`;
@@ -48,7 +52,18 @@ ssh root@server = SSH`;
 export function cleanName(rawName: string, language: 'zh' | 'en'): string {
   let name = rawName.trim();
 
-  // 移除开头的等号（如果模型重复了）
+  // 移除 markdown 格式
+  name = name.replace(/\*\*/g, '');
+  name = name.replace(/\*/g, '');
+  name = name.replace(/`/g, '');
+
+  // 如果包含等号，取等号后的部分
+  if (name.includes('=')) {
+    const parts = name.split('=');
+    name = parts[parts.length - 1].trim();
+  }
+
+  // 移除开头的等号
   name = name.replace(/^[=\s]+/, '');
 
   // 移除引号

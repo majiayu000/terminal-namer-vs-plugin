@@ -2,7 +2,7 @@
   "name": "terminal-ai-namer",
   "displayName": "Terminal AI Namer",
   "description": "AI-powered terminal naming - automatically generate meaningful terminal names based on executed commands",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "lif",
   "author": {
     "name": "lif"
