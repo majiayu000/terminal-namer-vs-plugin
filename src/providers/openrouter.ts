@@ -47,7 +47,7 @@ export class OpenRouterProvider implements AIProvider {
     };
 
     const rawName = data.choices[0]?.message?.content || '';
-    const name = cleanName(rawName, language);
+    const name = cleanName(rawName, language, cwd);
 
     return {
       name,

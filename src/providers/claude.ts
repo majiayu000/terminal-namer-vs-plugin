@@ -42,7 +42,7 @@ export class ClaudeProvider implements AIProvider {
     };
 
     const rawName = data.content[0]?.text || '';
-    const name = cleanName(rawName, language);
+    const name = cleanName(rawName, language, cwd);
 
     return {
       name,
