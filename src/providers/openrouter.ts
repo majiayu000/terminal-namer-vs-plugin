@@ -1,4 +1,4 @@
-import { AIProvider, GenerateResult, buildPrompt, cleanName } from './base';
+import { AIProvider, GenerateResult, GenerateContext, buildPrompt, cleanName } from './base';
 
 export class OpenRouterProvider implements AIProvider {
   private apiKey: string;
@@ -9,8 +9,9 @@ export class OpenRouterProvider implements AIProvider {
     this.model = model;
   }
 
-  async generateName(commands: string[], language: 'zh' | 'en'): Promise<GenerateResult> {
-    const prompt = buildPrompt(commands, language);
+  async generateName(context: GenerateContext): Promise<GenerateResult> {
+    const { commands, language, cwd } = context;
+    const prompt = buildPrompt({ commands, language, cwd });
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',

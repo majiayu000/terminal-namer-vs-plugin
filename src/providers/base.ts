@@ -1,4 +1,4 @@
 // Re-export types and prompt for backward compatibility
-export type { GenerateResult, AIProvider } from './types';
-export type { PromptMessages } from './prompt';
+export type { GenerateResult, AIProvider, GenerateContext } from './types';
+export type { PromptMessages, PromptContext } from './prompt';
 export { buildPrompt, cleanName } from './prompt';

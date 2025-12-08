@@ -2,47 +2,53 @@
  * 构建 AI 提示词
  *
  * 设计原则：
- * 1. 提取具体信息 - 服务名、环境、目标等，而非泛泛分类
- * 2. AI 的价值在于理解上下文，不是关键词匹配
- * 3. 名称应该有辨识度，能区分不同终端
+ * 1. 融合目录名 - 目录名是重要上下文，AI 应智能融入命名
+ * 2. 提取具体信息 - 服务名、环境、目标等，而非泛泛分类
+ * 3. 简洁有辨识度 - 能区分不同终端
  */
 export interface PromptMessages {
   system: string;
   user: string;
 }
 
-export function buildPrompt(commands: string[], language: 'zh' | 'en'): PromptMessages {
+export interface PromptContext {
+  commands: string[];
+  cwd?: string;  // 当前目录名（只是最后一级，如 "blog"）
+  language: 'zh' | 'en';
+}
+
+export function buildPrompt(context: PromptContext): PromptMessages {
+  const { commands, cwd, language } = context;
+
   // 去重并限制命令数量
   const uniqueCommands = [...new Set(commands)].slice(0, 5);
-  const commandStr = uniqueCommands.join('\n');
+  const commandStr = uniqueCommands.join(', ');
 
   const systemPrompt = language === 'zh'
-    ? `为终端生成简短名称(2-5字)。提取命令中的具体信息(服务名/环境/目标),不要泛泛分类。只输出名称。
+    ? `为终端生成简短名称(2-5字)。结合目录名和命令,提取具体信息。只输出名称。
 
-kubectl get pods -n payment → 支付Pod
-ssh deploy@staging-api → Staging部署
-npm run dev:admin → Admin开发
-docker logs nginx → Nginx日志
-git clone repo/user-svc → 用户服务
-python train.py --model=bert → Bert训练
-curl api.stripe.com → Stripe接口
-cd ~/blog && npm start → Blog启动
-pytest test_auth.py → 认证测试
-ls, pwd, cd → 文件浏览`
-    : `Generate short terminal name(1-3 words). Extract specific info(service/env/target), not generic categories. Output name only.
+@blog: npm run dev → Blog开发
+@api-service: docker up → API容器
+@ml-project: python train.py → ML训练
+@payment: kubectl logs → 支付日志
+@admin: npm run build → Admin构建
+@backend: go run main.go → 后端服务
+@: ls, cd → 文件浏览
+@: ssh root@prod → SSH生产`
+    : `Generate short terminal name(2-4 words). Combine directory and commands. Output name only.
 
-kubectl get pods -n payment → Payment-Pods
-ssh deploy@staging-api → Staging-Deploy
-npm run dev:admin → Admin-Dev
-docker logs nginx → Nginx-Logs
-git clone repo/user-svc → User-Service
-python train.py --model=bert → Bert-Training
-curl api.stripe.com → Stripe-API
-cd ~/blog && npm start → Blog-Start
-pytest test_auth.py → Auth-Tests
-ls, pwd, cd → Files`;
+@blog: npm run dev → Blog-Dev
+@api-service: docker up → API-Docker
+@ml-project: python train.py → ML-Training
+@payment: kubectl logs → Payment-Logs
+@admin: npm run build → Admin-Build
+@backend: go run main.go → Backend-Server
+@: ls, cd → Files
+@: ssh root@prod → SSH-Prod`;
 
-  const userPrompt = `${commandStr} →`;
+  // 用户消息格式: @目录名: 命令 →
+  const cwdPart = cwd ? `@${cwd}` : '@';
+  const userPrompt = `${cwdPart}: ${commandStr} →`;
 
   return { system: systemPrompt, user: userPrompt };
 }
@@ -106,4 +112,9 @@ export function cleanName(rawName: string, language: 'zh' | 'en'): string {
   }
 
   return name;
+}
+
+// 兼容旧接口
+export function buildPromptLegacy(commands: string[], language: 'zh' | 'en'): PromptMessages {
+  return buildPrompt({ commands, language });
 }

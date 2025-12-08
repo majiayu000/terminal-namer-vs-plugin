@@ -196,6 +196,28 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
+ * 获取终端当前目录名（只是最后一级）
+ */
+function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
+  try {
+    // VSCode 1.93+ Shell Integration API
+    const cwd = terminal.shellIntegration?.cwd;
+    if (cwd) {
+      // 只取最后一级目录名
+      const parts = cwd.fsPath.split(/[/\\]/);
+      const dirName = parts[parts.length - 1];
+      // 过滤掉用户目录名或无意义的名称
+      if (dirName && !['~', 'home', 'Users', 'user'].includes(dirName)) {
+        return dirName;
+      }
+    }
+  } catch {
+    // Shell Integration 不可用
+  }
+  return undefined;
+}
+
+/**
  * 使用 AI 重命名终端
  */
 async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[]) {
@@ -204,6 +226,7 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
     const language = config.get<'zh' | 'en'>('language', 'zh');
 
     const provider = createProvider();
+    const cwd = getTerminalCwd(terminal);
 
     await vscode.window.withProgress(
       {
@@ -212,7 +235,7 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
         cancellable: false
       },
       async () => {
-        const result = await provider.generateName(commands, language);
+        const result = await provider.generateName({ commands, language, cwd });
 
         // 记录使用量
         if (result.usage && usageTracker) {
