@@ -285,14 +285,56 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * Restore a terminal title after a mid-dispatch focus steal renamed the wrong
+ * instance. Must run under the rename mutex (does not re-acquire it).
+ */
+async function restoreTerminalName(
+  terminal: vscode.Terminal,
+  previousName: string
+): Promise<boolean> {
+  const focused = await waitForTerminalFocus(terminal, RENAME_FOCUS_TIMEOUT_MS);
+  if (!focused || vscode.window.activeTerminal !== terminal) {
+    return false;
+  }
+  await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
+    name: previousName
+  });
+  return terminal.name === previousName;
+}
+
+/**
+ * If renameWithArg hit a different terminal because focus drifted across the
+ * async dispatch boundary, put that collateral title back before retrying.
+ */
+async function restoreCollateralRenames(
+  target: vscode.Terminal,
+  intendedName: string,
+  nameByTerminal: Map<vscode.Terminal, string>
+): Promise<void> {
+  for (const candidate of vscode.window.terminals) {
+    if (candidate === target) {
+      continue;
+    }
+    const previousName = nameByTerminal.get(candidate);
+    if (previousName === undefined || previousName === intendedName) {
+      continue;
+    }
+    if (candidate.name === intendedName) {
+      await restoreTerminalName(candidate, previousName);
+    }
+  }
+}
+
+/**
  * Focus the target terminal and rename via renameWithArg under the rename mutex.
  *
  * VS Code only exposes active-terminal rename (`renameWithArg`); there is no
  * public API that names a specific Terminal instance. Mitigations:
  * 1. Wait for onDidChangeActiveTerminal (not fixed polling).
  * 2. Re-check activeTerminal immediately before executeCommand.
- * 3. Verify terminal.name matches the requested name after the command; retry
- *    if focus drifted across the async dispatch boundary.
+ * 3. Verify terminal.name matches the requested name after the command.
+ * 4. If focus drifted mid-dispatch, restore any collateral terminal that
+ *    received the intended name, then retry.
  */
 async function renameTerminalSafely(
   terminal: vscode.Terminal,
@@ -305,6 +347,12 @@ async function renameTerminalSafely(
         continue;
       }
 
+      // Snapshot titles so a mid-dispatch focus steal can be rolled back.
+      const nameByTerminal = new Map<vscode.Terminal, string>();
+      for (const t of vscode.window.terminals) {
+        nameByTerminal.set(t, t.name);
+      }
+
       // Final pre-dispatch snapshot — still best-effort under API limits.
       if (vscode.window.activeTerminal !== terminal) {
         continue;
@@ -315,10 +363,12 @@ async function renameTerminalSafely(
       });
 
       // Confirm this instance received the title. If another terminal stole
-      // focus mid-dispatch, our name will not match and we retry.
+      // focus mid-dispatch, restore that collateral rename and retry.
       if (terminal.name === name) {
         return true;
       }
+
+      await restoreCollateralRenames(terminal, name, nameByTerminal);
     }
     return false;
   });
@@ -362,8 +412,9 @@ async function renameTerminalWithAI(
         // After AI generation: serialize rename + re-check focus before renameWithArg
         renamed = await renameTerminalSafely(terminal, result.name);
         if (!renamed) {
-          // Ensure auto-rename can retry later (tracker also keys off return value).
-          tracker?.resetNamed(terminal);
+          // Do not resetNamed here: auto-rename already keys off the boolean
+          // return value, and clearing named would erase a prior successful
+          // manual/auto name after a failed focus-held rename attempt.
           vscode.window.showWarningMessage(
             `无法聚焦目标终端，已跳过命名（生成名称: ${result.name}）`
           );
@@ -382,7 +433,8 @@ async function renameTerminalWithAI(
 
     return renamed;
   } catch (error) {
-    tracker?.resetNamed(terminal);
+    // Preserve prior named=true so a failed manual rename does not re-arm
+    // auto-rename. Auto path already sets named from the returned boolean.
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
     return false;
