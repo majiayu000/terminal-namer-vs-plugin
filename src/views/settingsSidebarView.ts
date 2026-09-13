@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 import { UsageTracker } from '../core';
-import { ApiKeyProvider, deleteApiKey, hasApiKey, setApiKey } from '../secrets';
+import {
+  ApiKeyProvider,
+  clearLegacyApiKeySettings,
+  deleteApiKey,
+  hasApiKey,
+  setApiKey,
+} from '../secrets';
 
 /**
  * 侧边栏设置面板 Webview Provider
@@ -94,6 +100,10 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     if (!secretProvider) {
       return;
     }
+    // Clear retained conflicting legacy plaintext first (while SecretStorage still
+    // holds the key), then delete the secret so config-change migration cannot
+    // remigrate a revoked credential.
+    await clearLegacyApiKeySettings(secretProvider);
     await deleteApiKey(this._context, secretProvider);
   }
 

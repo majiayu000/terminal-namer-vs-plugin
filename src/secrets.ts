@@ -57,6 +57,29 @@ export async function deleteApiKey(
   await context.secrets.delete(SECRET_KEYS[provider]);
 }
 
+/**
+ * Remove all visible legacy plaintext values for a provider.
+ * Used when the user explicitly clears a key so retained conflicting
+ * settings cannot remigrate into SecretStorage on the next activation.
+ */
+export async function clearLegacyApiKeySettings(
+  provider: ApiKeyProvider
+): Promise<void> {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const configKey = LEGACY_CONFIG_KEYS[provider];
+  const inspected = config.inspect<string>(configKey);
+  if (!inspected) {
+    return;
+  }
+
+  for (const target of LEGACY_SCOPES) {
+    const scoped = readScopedString(inspected, target);
+    if (typeof scoped === 'string' && scoped.length > 0) {
+      await config.update(configKey, undefined, target);
+    }
+  }
+}
+
 export async function hasApiKey(
   context: vscode.ExtensionContext,
   provider: ApiKeyProvider
@@ -146,6 +169,7 @@ export async function migrateApiKeysFromConfig(
   context: vscode.ExtensionContext
 ): Promise<void> {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const failures: Array<{ provider: ApiKeyProvider; error: unknown }> = [];
 
   for (const provider of Object.keys(LEGACY_CONFIG_KEYS) as ApiKeyProvider[]) {
     try {
@@ -182,6 +206,19 @@ export async function migrateApiKeysFromConfig(
     } catch (providerError) {
       // Isolate per-provider failures so one read-only cleanup cannot skip the rest.
       console.error(`API key migration failed for provider ${provider}:`, providerError);
+      failures.push({ provider, error: providerError });
     }
+  }
+
+  // Continue other providers above, then surface failures so activate/config
+  // listeners can warn the user that plaintext may remain.
+  if (failures.length > 0) {
+    const detail = failures
+      .map(({ provider, error }) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return `${provider}: ${message}`;
+      })
+      .join('; ');
+    throw new Error(`API key migration failed for ${failures.length} provider(s): ${detail}`);
   }
 }

@@ -75,6 +75,10 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         void migrateApiKeysFromConfig(context).catch((migrationError) => {
           console.error('API key migration failed after config change:', migrationError);
+          vscode.window.showWarningMessage(
+            `Terminal AI Namer: API key migration failed (${migrationError}). ` +
+              'Plaintext settings may remain until migration succeeds.'
+          );
         });
       })
     );
