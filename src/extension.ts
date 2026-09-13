@@ -20,8 +20,10 @@ export async function activate(context: vscode.ExtensionContext) {
     extensionSecrets = context.secrets;
 
     // Migrate plaintext API keys before any SecretStorage consumers register.
+    // replaceExisting: true so offline edits to deprecated settings (made before
+    // this activation) replace stale SecretStorage values instead of being dropped.
     // Cleanup failures must not abort activation (Ollama / existing secrets still work).
-    await runApiKeyMigration(context.secrets, { replaceExisting: false });
+    await runApiKeyMigration(context.secrets, { replaceExisting: true });
 
     // If a user later sets a deprecated plaintext key in settings, migrate it
     // and replace any existing SecretStorage value for that scope.
