@@ -8,6 +8,29 @@ let terminalTreeProvider: TerminalTreeProvider | undefined;
 let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
 
+/**
+ * Serializes focus-dependent renameWithArg calls.
+ * VS Code renames the *active* terminal, not a specific instance, so concurrent
+ * renames (auto-rename + rename-all, or overlapping auto-renames) must not race.
+ */
+let renameMutex: Promise<void> = Promise.resolve();
+
+const RENAME_FOCUS_MAX_ATTEMPTS = 3;
+const RENAME_FOCUS_RETRY_DELAY_MS = 50;
+
+function withRenameLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = renameMutex.then(fn, fn);
+  renameMutex = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function activate(context: vscode.ExtensionContext) {
   console.log('=== Terminal AI Namer 正在激活 ===');
 
@@ -218,6 +241,31 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * Focus the target terminal and rename via renameWithArg under the rename mutex.
+ * Re-verifies activeTerminal === terminal immediately before the command;
+ * aborts/retries (bounded) if focus drifted.
+ */
+async function renameTerminalSafely(
+  terminal: vscode.Terminal,
+  name: string
+): Promise<boolean> {
+  return withRenameLock(async () => {
+    for (let attempt = 1; attempt <= RENAME_FOCUS_MAX_ATTEMPTS; attempt++) {
+      terminal.show();
+      await delay(RENAME_FOCUS_RETRY_DELAY_MS);
+
+      if (vscode.window.activeTerminal === terminal) {
+        await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
+          name
+        });
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+/**
  * 使用 AI 重命名终端
  */
 async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[]) {
@@ -246,13 +294,14 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
           );
         }
 
-        // 先切换到目标终端
-        terminal.show();
-
-        // 使用 VSCode 内置命令重命名终端
-        await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
-          name: result.name
-        });
+        // After AI generation: serialize rename + re-check focus before renameWithArg
+        const renamed = await renameTerminalSafely(terminal, result.name);
+        if (!renamed) {
+          vscode.window.showWarningMessage(
+            `无法聚焦目标终端，已跳过命名（生成名称: ${result.name}）`
+          );
+          return;
+        }
 
         // 标记为已命名
         tracker?.markAsNamed(terminal);
