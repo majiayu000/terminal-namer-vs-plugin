@@ -10,16 +10,19 @@ export type ProviderType = 'openai' | 'claude' | 'ollama' | 'openrouter';
 
 /**
  * 根据配置创建 AI Provider（API Key 从 SecretStorage 读取）
+ * @param resource optional URI (e.g. terminal cwd) so multi-root legacy keys
+ * resolve against the folder that owns the terminal, not always folder[0].
  */
 export async function createProvider(
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
+  resource?: vscode.Uri
 ): Promise<AIProvider> {
-  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const config = vscode.workspace.getConfiguration('terminalAiNamer', resource);
   const provider = config.get<ProviderType>('provider', 'openrouter');
 
   switch (provider) {
     case 'openai': {
-      const apiKey = await getApiKey(context, 'openai');
+      const apiKey = await getApiKey(context, 'openai', resource);
       if (!apiKey) {
         throw new Error('请先配置 OpenAI API Key');
       }
@@ -27,7 +30,7 @@ export async function createProvider(
     }
 
     case 'claude': {
-      const apiKey = await getApiKey(context, 'claude');
+      const apiKey = await getApiKey(context, 'claude', resource);
       if (!apiKey) {
         throw new Error('请先配置 Claude API Key');
       }
@@ -41,7 +44,7 @@ export async function createProvider(
     }
 
     case 'openrouter': {
-      const apiKey = await getApiKey(context, 'openrouter');
+      const apiKey = await getApiKey(context, 'openrouter', resource);
       if (!apiKey) {
         throw new Error('请先配置 OpenRouter API Key');
       }

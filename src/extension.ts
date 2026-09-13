@@ -1,7 +1,11 @@
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker } from './core';
 import { createProvider } from './providers';
-import { migrateApiKeysFromConfig, affectsLegacyApiKeyConfiguration } from './secrets';
+import {
+  migrateApiKeysFromConfig,
+  affectsLegacyApiKeyConfiguration,
+  resourceForTerminal,
+} from './secrets';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
 let tracker: TerminalTracker | undefined;
@@ -265,7 +269,11 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
     if (!extensionContext) {
       throw new Error('Extension context unavailable');
     }
-    const provider = await createProvider(extensionContext);
+    // Resolve API keys against the terminal's folder in multi-root workspaces.
+    const provider = await createProvider(
+      extensionContext,
+      resourceForTerminal(terminal)
+    );
     const cwd = getTerminalCwd(terminal);
 
     await vscode.window.withProgress(

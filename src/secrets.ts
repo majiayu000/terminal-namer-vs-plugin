@@ -170,27 +170,47 @@ function currentWorkspaceResource(): vscode.Uri | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri;
 }
 
-export async function getApiKey(
-  context: vscode.ExtensionContext,
-  provider: ApiKeyProvider
-): Promise<string | undefined> {
-  if (isApiKeyCleared(context, provider)) {
-    return undefined;
+/**
+ * Resolve configuration against the terminal's workspace folder when possible.
+ * Falls back to the first workspace folder only when no terminal cwd is known.
+ */
+export function resourceForTerminal(terminal: vscode.Terminal): vscode.Uri | undefined {
+  const shellCwd = terminal.shellIntegration?.cwd;
+  if (shellCwd) {
+    return shellCwd;
   }
 
-  const resource = currentWorkspaceResource();
-  const legacy = effectiveLegacyForResource(provider, resource);
-  // Explicit empty higher-priority override disables the credential in this workspace.
-  if (legacy.kind === 'empty') {
+  const creationOptions = terminal.creationOptions;
+  if (creationOptions && 'cwd' in creationOptions && creationOptions.cwd) {
+    const cwd = creationOptions.cwd;
+    return typeof cwd === 'string' ? vscode.Uri.file(cwd) : cwd;
+  }
+
+  return currentWorkspaceResource();
+}
+
+export async function getApiKey(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider,
+  resource?: vscode.Uri
+): Promise<string | undefined> {
+  if (isApiKeyCleared(context, provider)) {
     return undefined;
   }
 
   const secret = await context.secrets.get(SECRET_KEYS[provider]);
 
   // An explicit sidebar save takes precedence over retained conflicting plaintext
-  // (e.g. when some scopes were read-only and could not be cleared yet).
+  // and over explicit empty legacy overrides that could not be cleared yet.
   if (secretOverridesLegacy(context, provider)) {
     return secret || undefined;
+  }
+
+  const resolvedResource = resource ?? currentWorkspaceResource();
+  const legacy = effectiveLegacyForResource(provider, resolvedResource);
+  // Explicit empty higher-priority override disables the credential in this workspace.
+  if (legacy.kind === 'empty') {
+    return undefined;
   }
 
   // Retained conflicting workspace plaintext must remain effective for this workspace.
@@ -242,7 +262,8 @@ export async function clearLegacyApiKeySettings(
       return;
     }
     const scoped = readScopedString(inspected, target);
-    if (typeof scoped === 'string' && scoped.length > 0) {
+    // Clear non-empty keys and explicit empty overrides (empty can block SecretStorage).
+    if (typeof scoped === 'string') {
       await config.update(configKey, undefined, target);
     }
   };
@@ -277,9 +298,10 @@ export async function clearLegacyApiKeySettings(
 
 export async function hasApiKey(
   context: vscode.ExtensionContext,
-  provider: ApiKeyProvider
+  provider: ApiKeyProvider,
+  resource?: vscode.Uri
 ): Promise<boolean> {
-  const value = await getApiKey(context, provider);
+  const value = await getApiKey(context, provider, resource);
   return Boolean(value);
 }
 
@@ -326,12 +348,17 @@ async function clearCompatibleLegacyScopes(
  * After promoting the effective legacy value into SecretStorage, clear that
  * scope and every lower-precedence scope. Leaving a shadowed global/user key
  * would make it the new effective value and override the migrated secret.
+ *
+ * Clear lower-precedence scopes first, then the effective scope last. If a
+ * lower clear fails, the still-present effective value continues to shadow it
+ * so getApiKey cannot suddenly prefer the wrong lower-scope credential.
  */
 async function clearEffectiveAndLowerLegacyScopes(
   config: vscode.WorkspaceConfiguration,
   configKey: string,
   inspected: InspectedString
 ): Promise<void> {
+  // Highest → lowest priority for locating the effective scope.
   const scopeOrder: Array<{
     target: vscode.ConfigurationTarget;
     value: string | undefined;
@@ -350,20 +377,22 @@ async function clearEffectiveAndLowerLegacyScopes(
     },
   ];
 
-  let clearing = false;
-  for (const { target, value } of scopeOrder) {
-    if (!clearing) {
-      if (typeof value === 'string') {
-        // Start clearing at the effective (highest-priority) explicit scope.
-        clearing = true;
-      } else {
-        continue;
-      }
+  let effectiveIndex = -1;
+  for (let i = 0; i < scopeOrder.length; i++) {
+    if (typeof scopeOrder[i].value === 'string') {
+      effectiveIndex = i;
+      break;
     }
-    if (typeof value === 'string' && value.length > 0) {
-      await config.update(configKey, undefined, target);
-    } else if (typeof value === 'string' && value.length === 0) {
-      // Explicit empty at/below effective scope: remove the override entry too.
+  }
+  if (effectiveIndex < 0) {
+    return;
+  }
+
+  // Lowest → highest among effective+lower scopes so partial failure cannot
+  // expose a previously shadowed lower key after the effective one is gone.
+  const toClear = scopeOrder.slice(effectiveIndex).reverse();
+  for (const { target, value } of toClear) {
+    if (typeof value === 'string') {
       await config.update(configKey, undefined, target);
     }
   }
