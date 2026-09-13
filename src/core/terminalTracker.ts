@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
 
+interface TrackedCommand {
+  value: string;
+  /** Workspace folder URI when the command ran; undefined if CWD/folder was unknown. */
+  folderUri?: string;
+}
+
 interface TerminalData {
-  commands: string[];
+  commands: TrackedCommand[];
   named: boolean;
 }
 
@@ -75,6 +81,33 @@ export class TerminalTracker {
     );
   }
 
+  /**
+   * Resolve the workspace-folder URI that owns a terminal CWD (credential scope).
+   */
+  private resolveFolderUri(
+    terminal: vscode.Terminal,
+    executionCwd?: vscode.Uri
+  ): string | undefined {
+    const cwd = executionCwd ?? this.getTerminalCwd(terminal);
+    if (!cwd) {
+      const folders = vscode.workspace.workspaceFolders;
+      // Sole folder is unambiguous even without Shell Integration CWD.
+      if (folders?.length === 1) {
+        return folders[0].uri.toString();
+      }
+      return undefined;
+    }
+    return vscode.workspace.getWorkspaceFolder(cwd)?.uri.toString();
+  }
+
+  private getTerminalCwd(terminal: vscode.Terminal): vscode.Uri | undefined {
+    try {
+      return terminal.shellIntegration?.cwd;
+    } catch {
+      return undefined;
+    }
+  }
+
   private handleCommandExecution(event: vscode.TerminalShellExecutionEndEvent) {
     const terminal = event.terminal;
     const execution = event.execution;
@@ -95,21 +128,37 @@ export class TerminalTracker {
       this.terminalDataMap.set(terminal, data);
     }
 
-    // 添加命令到历史
-    data.commands.push(command);
+    // Prefer execution cwd when available so folder scope matches the command.
+    const executionCwd =
+      'cwd' in execution && execution.cwd instanceof vscode.Uri
+        ? execution.cwd
+        : undefined;
+    const folderUri = this.resolveFolderUri(terminal, executionCwd);
+
+    // Drop history from other folders so auto-rename never mixes credential scopes.
+    if (folderUri !== undefined) {
+      const priorSameScope = data.commands.filter((c) => c.folderUri === folderUri);
+      if (priorSameScope.length !== data.commands.length) {
+        data.commands = priorSameScope;
+        // Allow auto-rename again after crossing into a new folder.
+        data.named = false;
+      }
+    }
+
+    data.commands.push({ value: command, folderUri });
 
     // 只保留最近的命令
     if (data.commands.length > 10) {
       data.commands = data.commands.slice(-10);
     }
 
-    // 检查是否达到阈值且未命名
+    // 检查是否达到阈值且未命名 — only same-folder commands count.
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const autoRename = config.get<boolean>('autoRename', true);
+    const scoped = this.getCommands(terminal, this.getTerminalCwd(terminal) ?? executionCwd);
 
-    if (autoRename && !data.named && data.commands.length >= this.commandThreshold) {
-      // 触发命名回调
-      this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold));
+    if (autoRename && !data.named && scoped.length >= this.commandThreshold) {
+      this.onCommandThresholdReached(terminal, scoped.slice(0, this.commandThreshold));
       data.named = true;
     }
   }
@@ -124,7 +173,16 @@ export class TerminalTracker {
       this.terminalDataMap.set(terminal, data);
     }
 
-    data.commands.push(command);
+    const folderUri = this.resolveFolderUri(terminal);
+    if (folderUri !== undefined) {
+      const priorSameScope = data.commands.filter((c) => c.folderUri === folderUri);
+      if (priorSameScope.length !== data.commands.length) {
+        data.commands = priorSameScope;
+        data.named = false;
+      }
+    }
+
+    data.commands.push({ value: command, folderUri });
 
     if (data.commands.length > 10) {
       data.commands = data.commands.slice(-10);
@@ -132,10 +190,34 @@ export class TerminalTracker {
   }
 
   /**
-   * 获取终端的命令历史
+   * 获取终端的命令历史。
+   * When `resource` is provided, only returns commands captured under the same
+   * workspace folder (credential scope) so rename never sends folder-A history
+   * through folder-B credentials.
    */
-  getCommands(terminal: vscode.Terminal): string[] {
-    return this.terminalDataMap.get(terminal)?.commands || [];
+  getCommands(terminal: vscode.Terminal, resource?: vscode.Uri): string[] {
+    const data = this.terminalDataMap.get(terminal);
+    if (!data) {
+      return [];
+    }
+
+    const targetFolder = resource
+      ? vscode.workspace.getWorkspaceFolder(resource)?.uri.toString()
+      : this.resolveFolderUri(terminal);
+
+    if (targetFolder === undefined) {
+      const folders = vscode.workspace.workspaceFolders;
+      // Multi-root without a resolvable folder: never include folder-tagged
+      // history (those belong to a specific credential scope).
+      if (folders && folders.length > 1) {
+        return data.commands.filter((c) => !c.folderUri).map((c) => c.value);
+      }
+      return data.commands.map((c) => c.value);
+    }
+
+    return data.commands
+      .filter((c) => c.folderUri === targetFolder)
+      .map((c) => c.value);
   }
 
   /**

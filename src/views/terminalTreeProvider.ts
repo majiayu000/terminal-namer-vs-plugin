@@ -57,7 +57,13 @@ export class TerminalTreeProvider implements vscode.TreeDataProvider<TerminalIte
   getChildren(): TerminalItem[] {
     const activeTerminal = vscode.window.activeTerminal;
     return vscode.window.terminals.map((terminal) => {
-      const commands = this.tracker.getCommands(terminal);
+      let resource: vscode.Uri | undefined;
+      try {
+        resource = terminal.shellIntegration?.cwd;
+      } catch {
+        resource = undefined;
+      }
+      const commands = this.tracker.getCommands(terminal, resource);
       const isActive = terminal === activeTerminal;
       return new TerminalItem(terminal, commands, isActive);
     });

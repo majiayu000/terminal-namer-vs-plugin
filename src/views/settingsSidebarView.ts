@@ -121,6 +121,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           await this._sendCurrentSettings();
           this.updateStats();
           break;
+        case 'getProviderApiKeyStatus':
+          await this._sendProviderApiKeyStatus(message.provider);
+          break;
         case 'openFullSettings':
           vscode.commands.executeCommand('terminalAiNamer.openSettings');
           break;
@@ -226,6 +229,33 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       command: 'saveSettingsResult',
       ok,
       error: error ?? null
+    });
+  }
+
+  private async _sendProviderApiKeyStatus(providerRaw: unknown) {
+    if (!this._view) {
+      return;
+    }
+
+    const provider =
+      typeof providerRaw === 'string' &&
+      (ALLOWED_PROVIDERS as readonly string[]).includes(providerRaw)
+        ? (providerRaw as ProviderType)
+        : undefined;
+
+    if (!provider) {
+      return;
+    }
+
+    let apiKeyConfigured = false;
+    if (isApiKeyProvider(provider)) {
+      apiKeyConfigured = await hasApiKey(this._secrets, provider as ApiKeyProvider);
+    }
+
+    this._view.webview.postMessage({
+      command: 'providerApiKeyStatus',
+      provider,
+      apiKeyConfigured
     });
   }
 
@@ -504,14 +534,19 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       clearRequested = false;
       pendingApiKeyDraft = '';
       document.getElementById('apiKey').value = '';
+      const provider = document.getElementById('provider').value;
+      if (provider === 'ollama') {
+        apiKeyConfigured = false;
+        updateApiKeyUi();
+        document.getElementById('status').classList.add('hidden');
+        return;
+      }
+      // Query host for the selected provider's SecretStorage status so an
+      // already-configured key remains visible/clearable without saving first.
       apiKeyConfigured = false;
       updateApiKeyUi();
-      const provider = document.getElementById('provider').value;
-      if (provider !== 'ollama') {
-        updateStatus(false);
-      } else {
-        document.getElementById('status').classList.add('hidden');
-      }
+      updateStatus(false);
+      vscode.postMessage({ command: 'getProviderApiKeyStatus', provider: provider });
     }
 
     function updateApiKeyUi() {
@@ -658,6 +693,18 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           document.getElementById('status').classList.add('hidden');
         }
         syncProviderUi();
+      } else if (message.command === 'providerApiKeyStatus') {
+        const selected = document.getElementById('provider').value;
+        if (message.provider !== selected) {
+          return;
+        }
+        apiKeyConfigured = !!message.apiKeyConfigured;
+        updateApiKeyUi();
+        if (selected !== 'ollama') {
+          updateStatus(apiKeyConfigured);
+        } else {
+          document.getElementById('status').classList.add('hidden');
+        }
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);
       }

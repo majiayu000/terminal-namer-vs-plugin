@@ -141,7 +141,8 @@ export async function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        const commands = tracker?.getCommands(terminal) || [];
+        const resource = getTerminalCwdUri(terminal);
+        const commands = tracker?.getCommands(terminal, resource) || [];
         if (commands.length === 0) {
           vscode.window.showWarningMessage('当前终端没有命令历史，请先执行一些命令');
           return;
@@ -159,7 +160,8 @@ export async function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        const commands = tracker?.getCommands(item.terminal) || [];
+        const resource = getTerminalCwdUri(item.terminal);
+        const commands = tracker?.getCommands(item.terminal, resource) || [];
         if (commands.length === 0) {
           vscode.window.showWarningMessage('该终端没有命令历史');
           return;
@@ -191,7 +193,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         let renamedCount = 0;
         for (const terminal of terminals) {
-          const commands = tracker?.getCommands(terminal) || [];
+          const resource = getTerminalCwdUri(terminal);
+          const commands = tracker?.getCommands(terminal, resource) || [];
           if (commands.length > 0) {
             await renameTerminalWithAI(terminal, commands);
             renamedCount++;
