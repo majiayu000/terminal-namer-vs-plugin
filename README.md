@@ -79,7 +79,7 @@ Non-secret options can still be set via VS Code settings:
 | `commandThreshold` | Commands before auto-rename | `3` |
 | `language` | Naming language (zh/en) | `zh` |
 
-API keys are managed only via the sidebar settings panel (SecretStorage), never as configuration properties.
+API keys are managed via the sidebar settings panel (SecretStorage). Legacy `*ApiKey` configuration properties remain registered as deprecated so migration can clear leftover plaintext values.
 
 ## Recommended Models
 

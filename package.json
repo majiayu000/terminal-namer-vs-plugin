@@ -146,6 +146,12 @@
           ],
           "description": "选择 AI 服务提供商"
         },
+        "terminalAiNamer.openrouterApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Deprecated: use the sidebar settings panel (SecretStorage). Kept registered so migration can clear leftover plaintext.",
+          "deprecationMessage": "API keys are stored in SecretStorage. Use the Terminal AI Namer sidebar to manage keys."
+        },
         "terminalAiNamer.openrouterModel": {
           "type": "string",
           "default": "google/gemini-2.5-flash",
@@ -170,6 +176,18 @@
             "Llama 3.1 8B - 开源"
           ],
           "description": "OpenRouter 使用的模型"
+        },
+        "terminalAiNamer.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Deprecated: use the sidebar settings panel (SecretStorage). Kept registered so migration can clear leftover plaintext.",
+          "deprecationMessage": "API keys are stored in SecretStorage. Use the Terminal AI Namer sidebar to manage keys."
+        },
+        "terminalAiNamer.claudeApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Deprecated: use the sidebar settings panel (SecretStorage). Kept registered so migration can clear leftover plaintext.",
+          "deprecationMessage": "API keys are stored in SecretStorage. Use the Terminal AI Namer sidebar to manage keys."
         },
         "terminalAiNamer.ollamaEndpoint": {
           "type": "string",

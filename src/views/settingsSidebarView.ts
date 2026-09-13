@@ -100,11 +100,18 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     if (!secretProvider) {
       return;
     }
-    // Clear retained conflicting legacy plaintext first (while SecretStorage still
-    // holds the key), then delete the secret so config-change migration cannot
-    // remigrate a revoked credential.
-    await clearLegacyApiKeySettings(secretProvider);
+    // Delete SecretStorage (+ tombstone) first so Clear succeeds even when some
+    // retained legacy settings live in read-only workspace files. Best-effort
+    // plaintext cleanup follows; remigration is blocked by the tombstone.
     await deleteApiKey(this._context, secretProvider);
+    try {
+      await clearLegacyApiKeySettings(secretProvider);
+    } catch (error) {
+      console.error('Failed to clear some legacy API key settings after delete:', error);
+      vscode.window.showWarningMessage(
+        'API Key cleared from SecretStorage, but some plaintext settings could not be removed (they may be read-only).'
+      );
+    }
   }
 
   private async _sendApiKeyStatus(provider: unknown) {
@@ -421,7 +428,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('apiKey').value = '';
       const provider = document.getElementById('provider').value;
       if (provider === 'ollama') {
-        updateStatus(true);
+        updateStatus(true, { resetInput: true });
         return;
       }
       // Query SecretStorage for the newly selected provider instead of forcing missing.
@@ -486,14 +493,19 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('totalCost').textContent = formatCost(stats.totalCost);
     }
 
-    function updateStatus(hasKey) {
+    function updateStatus(hasKey, options) {
+      const resetInput = !!(options && options.resetInput);
       const status = document.getElementById('status');
       const hint = document.getElementById('apiKeyHint');
       const clearBtn = document.getElementById('clearApiKeyBtn');
       const input = document.getElementById('apiKey');
       const provider = document.getElementById('provider').value;
       hasExistingApiKey = !!hasKey;
-      input.value = '';
+      // Only wipe the password field on provider transitions / full settings reload /
+      // completed save — never when an async apiKeyStatus reply arrives mid-typing.
+      if (resetInput) {
+        input.value = '';
+      }
       input.placeholder = hasKey ? '•••••••• (saved securely)' : 'Enter API Key';
       hint.style.display = hasKey ? 'block' : 'none';
       clearBtn.style.display = hasKey && provider !== 'ollama' ? 'block' : 'none';
@@ -525,14 +537,15 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           document.getElementById('model').value = s.openrouterModel;
         }
 
-        updateStatus(!!s.hasApiKey);
+        updateStatus(!!s.hasApiKey, { resetInput: true });
         syncProviderUi();
       } else if (message.command === 'apiKeyStatus') {
         // Ignore stale replies if the user already changed selection again.
         if (message.provider !== document.getElementById('provider').value) {
           return;
         }
-        updateStatus(!!message.hasApiKey);
+        // Preserve any in-progress typed key while the async status reply arrives.
+        updateStatus(!!message.hasApiKey, { resetInput: false });
         syncProviderUi();
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);
