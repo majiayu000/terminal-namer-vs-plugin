@@ -16,8 +16,17 @@ export async function activate(context: vscode.ExtensionContext) {
   try {
     extensionContext = context;
 
-    // 一次性迁移：明文 settings → SecretStorage
-    await migrateApiKeysFromConfig(context);
+    // Migrate leftover plaintext settings → SecretStorage.
+    // Failures must not block activation (e.g. read-only workspace settings).
+    try {
+      await migrateApiKeysFromConfig(context);
+    } catch (migrationError) {
+      console.error('API key migration failed:', migrationError);
+      vscode.window.showWarningMessage(
+        `Terminal AI Namer: API key migration failed (${migrationError}). ` +
+          'Plaintext settings may remain until migration succeeds.'
+      );
+    }
 
     // 初始化使用量追踪器
     usageTracker = new UsageTracker(context);
