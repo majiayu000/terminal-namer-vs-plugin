@@ -4,8 +4,11 @@ interface TerminalData {
   commands: string[];
   named: boolean;
   namingInProgress: boolean;
-  /** Permanent provider/config failure — do not re-arm auto-rename per command. */
-  autoRenameBlocked: boolean;
+  /**
+   * Epoch ms until which auto-rename stays suppressed after a provider/config
+   * failure. 0 means not blocked. Cleared on relevant config changes.
+   */
+  autoRenameBlockedUntil: number;
 }
 
 /** Auto-rename callback result: success, focus skip, or permanent failure. */
@@ -15,6 +18,30 @@ export type AutoRenameResult =
   | 'skipped'
   | 'failed'
   | void;
+
+/** Cooldown after provider/config failure before auto-rename may retry. */
+const AUTO_RENAME_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+
+const PROVIDER_CONFIG_KEYS = [
+  'terminalAiNamer.provider',
+  'terminalAiNamer.openrouterApiKey',
+  'terminalAiNamer.openrouterModel',
+  'terminalAiNamer.openaiApiKey',
+  'terminalAiNamer.claudeApiKey',
+  'terminalAiNamer.ollamaEndpoint',
+  'terminalAiNamer.ollamaModel',
+  'terminalAiNamer.autoRename',
+  'terminalAiNamer.language'
+] as const;
+
+function freshTerminalData(): TerminalData {
+  return {
+    commands: [],
+    named: false,
+    namingInProgress: false,
+    autoRenameBlockedUntil: 0
+  };
+}
 
 /**
  * 终端命令追踪器
@@ -45,16 +72,17 @@ export class TerminalTracker {
     return config.get<number>('commandThreshold', 3);
   }
 
+  private clearAutoRenameBlocks() {
+    for (const data of this.terminalDataMap.values()) {
+      data.autoRenameBlockedUntil = 0;
+    }
+  }
+
   private init() {
     // 监听终端创建
     this.disposables.push(
       vscode.window.onDidOpenTerminal((terminal) => {
-        this.terminalDataMap.set(terminal, {
-          commands: [],
-          named: false,
-          namingInProgress: false,
-          autoRenameBlocked: false
-        });
+        this.terminalDataMap.set(terminal, freshTerminalData());
       })
     );
 
@@ -83,12 +111,7 @@ export class TerminalTracker {
     // 初始化已存在的终端
     vscode.window.terminals.forEach((terminal) => {
       if (!this.terminalDataMap.has(terminal)) {
-        this.terminalDataMap.set(terminal, {
-          commands: [],
-          named: false,
-          namingInProgress: false,
-          autoRenameBlocked: false
-        });
+        this.terminalDataMap.set(terminal, freshTerminalData());
       }
     });
 
@@ -97,6 +120,12 @@ export class TerminalTracker {
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('terminalAiNamer.commandThreshold')) {
           this.commandThreshold = this.getCommandThreshold();
+        }
+        // Re-enable auto-rename after the user fixes provider settings (or
+        // toggles related options). Without this, a failed key/endpoint leaves
+        // terminals blocked even after configuration is corrected.
+        if (PROVIDER_CONFIG_KEYS.some((key) => e.affectsConfiguration(key))) {
+          this.clearAutoRenameBlocks();
         }
       })
     );
@@ -118,12 +147,7 @@ export class TerminalTracker {
 
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = {
-        commands: [],
-        named: false,
-        namingInProgress: false,
-        autoRenameBlocked: false
-      };
+      data = freshTerminalData();
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -138,12 +162,13 @@ export class TerminalTracker {
     // 检查是否达到阈值且未命名
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const autoRename = config.get<boolean>('autoRename', true);
+    const now = Date.now();
 
     if (
       autoRename &&
       !data.named &&
       !data.namingInProgress &&
-      !data.autoRenameBlocked &&
+      data.autoRenameBlockedUntil <= now &&
       data.commands.length >= this.commandThreshold
     ) {
       // Hold a rename lock until the async callback reports success/failure.
@@ -156,17 +181,20 @@ export class TerminalTracker {
           // Only promote to named on explicit success. On focus skip, leave
           // an already-true named flag intact so a concurrent successful manual
           // rename (markAsNamed) is not overwritten back to false.
-          // Provider/config failures block further auto-rename retries.
+          // Provider/config failures apply a cooldown (cleared on config change).
           if (result === true || result === 'renamed') {
             data!.named = true;
+            data!.autoRenameBlockedUntil = 0;
           } else if (result === 'failed') {
-            data!.autoRenameBlocked = true;
+            data!.autoRenameBlockedUntil =
+              Date.now() + AUTO_RENAME_FAILURE_COOLDOWN_MS;
           }
         })
         .catch(() => {
-          // Unexpected callback throw: treat like a permanent failure so we do
-          // not spam provider attempts on every subsequent shell command.
-          data!.autoRenameBlocked = true;
+          // Unexpected callback throw: cooldown so we do not spam provider
+          // attempts on every subsequent shell command.
+          data!.autoRenameBlockedUntil =
+            Date.now() + AUTO_RENAME_FAILURE_COOLDOWN_MS;
         })
         .finally(() => {
           data!.namingInProgress = false;
@@ -180,12 +208,7 @@ export class TerminalTracker {
   addCommand(terminal: vscode.Terminal, command: string) {
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = {
-        commands: [],
-        named: false,
-        namingInProgress: false,
-        autoRenameBlocked: false
-      };
+      data = freshTerminalData();
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -210,7 +233,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = false;
-      data.autoRenameBlocked = false;
+      data.autoRenameBlockedUntil = 0;
     }
   }
 
@@ -221,7 +244,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = true;
-      data.autoRenameBlocked = false;
+      data.autoRenameBlockedUntil = 0;
     }
   }
 

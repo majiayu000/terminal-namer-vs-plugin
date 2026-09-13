@@ -371,10 +371,9 @@ async function dispatchRenameWithArg(
     return true;
   }
 
-  // Mid-dispatch focus steal: always roll back terminals that wrongly received
-  // `name` (depth was > 0 so nested recovery still has budget, or refuses
-  // further unprotected dispatches at depth 0 without skipping detection).
-  let nestedCollateralRestored = false;
+  // Mid-dispatch focus steal: roll back terminals that wrongly received `name`
+  // (depth was > 0 so nested recovery still has budget, or refuses further
+  // unprotected dispatches at depth 0 without skipping detection).
   for (const candidate of vscode.window.terminals) {
     if (candidate === terminal) {
       continue;
@@ -388,6 +387,7 @@ async function dispatchRenameWithArg(
       continue;
     }
     if (prior === name) {
+      // Already had the intended title before dispatch — not new collateral.
       continue;
     }
     if (candidate.name !== name) {
@@ -406,16 +406,12 @@ async function dispatchRenameWithArg(
     if (candidate.name === name) {
       return false;
     }
-    nestedCollateralRestored = true;
   }
 
-  if (!nestedCollateralRestored) {
-    return false;
-  }
-
-  // Nested undo cleared collateral damage, but this terminal may still hold the
-  // erroneous title from the failed dispatch. Retry the parent rename rather
-  // than abandoning restoration after a successful nested rollback.
+  // Target still lacks `name`. Either nested undo cleared collateral, or focus
+  // landed on a terminal that already had `name` (no observable new collateral).
+  // Retry the parent rename in both cases — requiring nested rollback would
+  // abort restoration while the original terminal keeps the wrong title.
   if (terminal.name === name) {
     return true;
   }
