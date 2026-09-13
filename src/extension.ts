@@ -1,17 +1,24 @@
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker } from './core';
 import { createProvider } from './providers';
+import { migrateApiKeysFromSettings } from './secrets/apiKeys';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
 let tracker: TerminalTracker | undefined;
 let terminalTreeProvider: TerminalTreeProvider | undefined;
 let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
+let extensionSecrets: vscode.SecretStorage | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('=== Terminal AI Namer 正在激活 ===');
 
   try {
+    extensionSecrets = context.secrets;
+
+    // Migrate any plaintext API keys from settings into SecretStorage.
+    void migrateApiKeysFromSettings(context.secrets);
+
     // 初始化使用量追踪器
     usageTracker = new UsageTracker(context);
 
@@ -26,7 +33,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerTreeDataProvider('terminalAiNamer.terminalList', terminalTreeProvider);
 
     // 初始化侧边栏 - 设置面板
-    settingsSidebarProvider = new SettingsSidebarProvider(context.extensionUri, usageTracker);
+    settingsSidebarProvider = new SettingsSidebarProvider(
+      context.extensionUri,
+      context.secrets,
+      usageTracker
+    );
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider(
         SettingsSidebarProvider.viewType,
@@ -225,7 +236,10 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
 
-    const provider = createProvider();
+    if (!extensionSecrets) {
+      throw new Error('扩展未完成初始化');
+    }
+    const provider = await createProvider(extensionSecrets);
     const cwd = getTerminalCwd(terminal);
 
     await vscode.window.withProgress(

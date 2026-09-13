@@ -1,5 +1,62 @@
 import * as vscode from 'vscode';
 import { UsageTracker } from '../core';
+import { ProviderType } from '../providers';
+import {
+  ApiKeyProvider,
+  clearApiKey,
+  hasApiKey,
+  isApiKeyProvider,
+  setApiKey
+} from '../secrets/apiKeys';
+
+const ALLOWED_PROVIDERS: readonly ProviderType[] = [
+  'openrouter',
+  'openai',
+  'claude',
+  'ollama'
+];
+
+const ALLOWED_LANGUAGES = ['zh', 'en'] as const;
+
+const ALLOWED_OPENROUTER_MODELS = [
+  'google/gemini-2.5-flash',
+  'google/gemini-2.5-pro',
+  'google/gemini-2.0-flash-001',
+  'anthropic/claude-3-haiku',
+  'anthropic/claude-3.5-sonnet',
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o',
+  'meta-llama/llama-3.1-8b-instruct'
+] as const;
+
+type AllowedSettingKey =
+  | 'provider'
+  | 'openrouterModel'
+  | 'autoRename'
+  | 'commandThreshold'
+  | 'language';
+
+type SettingValidator = (value: unknown) => boolean;
+
+const SETTING_VALIDATORS: Record<AllowedSettingKey, SettingValidator> = {
+  provider: (v) =>
+    typeof v === 'string' && (ALLOWED_PROVIDERS as readonly string[]).includes(v),
+  openrouterModel: (v) =>
+    typeof v === 'string' &&
+    (ALLOWED_OPENROUTER_MODELS as readonly string[]).includes(v),
+  autoRename: (v) => typeof v === 'boolean',
+  commandThreshold: (v) =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 10,
+  language: (v) =>
+    typeof v === 'string' && (ALLOWED_LANGUAGES as readonly string[]).includes(v)
+};
+
+interface SaveSettingsMessage {
+  command: 'saveSettings';
+  settings?: Record<string, unknown>;
+  /** New API key to store; omit to keep existing. Empty string clears. */
+  apiKey?: string;
+}
 
 /**
  * 侧边栏设置面板 Webview Provider
@@ -11,6 +68,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
+    private readonly _secrets: vscode.SecretStorage,
     usageTracker?: UsageTracker
   ) {
     this._usageTracker = usageTracker;
@@ -46,16 +104,15 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [this._extensionUri]
     };
 
-    webviewView.webview.html = this._getHtmlContent();
+    webviewView.webview.html = this._getHtmlContent(webviewView.webview);
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
         case 'saveSettings':
-          await this._saveSettings(message.settings);
-          vscode.window.showInformationMessage('设置已保存');
+          await this._saveSettings(message as SaveSettingsMessage);
           break;
         case 'getSettings':
-          this._sendCurrentSettings();
+          await this._sendCurrentSettings();
           this.updateStats();
           break;
         case 'openFullSettings':
@@ -67,39 +124,105 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    this._sendCurrentSettings();
+    void this._sendCurrentSettings();
     this.updateStats();
   }
 
-  private async _saveSettings(settings: Record<string, unknown>) {
-    const config = vscode.workspace.getConfiguration('terminalAiNamer');
-    for (const [key, value] of Object.entries(settings)) {
-      await config.update(key, value, vscode.ConfigurationTarget.Global);
+  private async _saveSettings(message: SaveSettingsMessage) {
+    const settings = message.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      vscode.window.showErrorMessage('设置保存失败: 无效的设置载荷');
+      return;
     }
+
+    const config = vscode.workspace.getConfiguration('terminalAiNamer');
+    const rejected: string[] = [];
+    let providerForKey: ProviderType | undefined;
+
+    for (const [key, value] of Object.entries(settings)) {
+      if (!(key in SETTING_VALIDATORS)) {
+        rejected.push(key);
+        continue;
+      }
+
+      const settingKey = key as AllowedSettingKey;
+      if (!SETTING_VALIDATORS[settingKey](value)) {
+        rejected.push(key);
+        continue;
+      }
+
+      if (settingKey === 'provider') {
+        providerForKey = value as ProviderType;
+      }
+
+      await config.update(settingKey, value, vscode.ConfigurationTarget.Global);
+    }
+
+    if (rejected.length > 0) {
+      vscode.window.showWarningMessage(
+        `已忽略无效设置项: ${rejected.join(', ')}`
+      );
+    }
+
+    // API keys never go through configuration — only SecretStorage.
+    if (typeof message.apiKey === 'string') {
+      const provider =
+        providerForKey ??
+        config.get<ProviderType>('provider', 'openrouter');
+
+      if (!isApiKeyProvider(provider)) {
+        vscode.window.showWarningMessage('当前提供商不使用 API Key');
+      } else if (message.apiKey.length === 0) {
+        await clearApiKey(this._secrets, provider);
+      } else {
+        await setApiKey(this._secrets, provider, message.apiKey);
+      }
+    }
+
+    vscode.window.showInformationMessage('设置已保存');
+    await this._sendCurrentSettings();
   }
 
-  private _sendCurrentSettings() {
+  private async _sendCurrentSettings() {
     if (!this._view) return;
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
+    const provider = config.get<ProviderType>('provider', 'openrouter');
+    let apiKeyConfigured = false;
+
+    if (isApiKeyProvider(provider)) {
+      apiKeyConfigured = await hasApiKey(this._secrets, provider as ApiKeyProvider);
+    }
+
+    // Never send plaintext API keys into the webview.
     this._view.webview.postMessage({
       command: 'loadSettings',
       settings: {
-        provider: config.get('provider', 'openrouter'),
-        openrouterApiKey: config.get('openrouterApiKey', ''),
+        provider,
         openrouterModel: config.get('openrouterModel', 'google/gemini-2.5-flash'),
         autoRename: config.get('autoRename', true),
         commandThreshold: config.get('commandThreshold', 3),
-        language: config.get('language', 'zh')
+        language: config.get('language', 'zh'),
+        apiKeyConfigured
       }
     });
   }
 
-  private _getHtmlContent(): string {
+  private _getHtmlContent(webview: vscode.Webview): string {
+    const nonce = getNonce();
+    const csp = [
+      `default-src 'none'`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `script-src 'nonce-${nonce}'`,
+      `img-src ${webview.cspSource} https:`,
+      `font-src ${webview.cspSource}`
+    ].join('; ');
+
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -174,11 +297,15 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       border: 1px solid var(--vscode-inputValidation-warningBorder);
     }
     .api-key-group { position: relative; }
+    .api-key-hint {
+      font-size: 11px;
+      opacity: 0.7;
+      margin-top: 4px;
+    }
     .toggle-visibility {
       position: absolute;
       right: 6px;
-      top: 50%;
-      transform: translateY(-50%);
+      top: 22px;
       background: none;
       border: none;
       width: auto;
@@ -207,10 +334,11 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     .stats-label { opacity: 0.7; }
     .stats-value { font-weight: 600; }
     .stats-value.cost { color: var(--vscode-charts-green); }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <div id="status" class="status warning" style="display:none;"></div>
+  <div id="status" class="status warning hidden"></div>
 
   <div class="section">
     <div class="section-title">Usage Stats</div>
@@ -242,15 +370,15 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         <span class="stats-value cost" id="totalCost">$0.000000</span>
       </div>
     </div>
-    <button class="secondary" onclick="resetStats()">Reset Stats</button>
+    <button type="button" class="secondary" id="resetStatsBtn">Reset Stats</button>
   </div>
 
   <div class="section">
     <div class="section-title">AI Config</div>
 
     <div class="form-group">
-      <label>Provider</label>
-      <select id="provider" onchange="onProviderChange()">
+      <label for="provider">Provider</label>
+      <select id="provider">
         <option value="openrouter">OpenRouter</option>
         <option value="openai">OpenAI</option>
         <option value="claude">Claude</option>
@@ -258,14 +386,16 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       </select>
     </div>
 
-    <div class="form-group api-key-group">
-      <label>API Key</label>
-      <input type="password" id="apiKey" placeholder="Enter API Key">
-      <button class="toggle-visibility" onclick="toggleApiKey()">*</button>
+    <div class="form-group api-key-group" id="apiKeyGroup">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="Enter new API Key" autocomplete="off">
+      <button type="button" class="toggle-visibility" id="toggleApiKeyBtn" aria-label="Toggle API key visibility">*</button>
+      <div class="api-key-hint" id="apiKeyHint"></div>
+      <button type="button" class="secondary hidden" id="clearApiKeyBtn">Clear API Key</button>
     </div>
 
     <div class="form-group" id="modelGroup">
-      <label>Model</label>
+      <label for="model">Model</label>
       <select id="model">
         <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (Recommended)</option>
         <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
@@ -274,6 +404,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
         <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
         <option value="openai/gpt-4o">GPT-4o</option>
+        <option value="meta-llama/llama-3.1-8b-instruct">Llama 3.1 8B</option>
       </select>
     </div>
   </div>
@@ -289,12 +420,12 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="form-group">
-      <label>Command threshold</label>
+      <label for="threshold">Command threshold</label>
       <input type="number" id="threshold" min="1" max="10" value="3">
     </div>
 
     <div class="form-group">
-      <label>Language</label>
+      <label for="language">Language</label>
       <select id="language">
         <option value="zh">Chinese</option>
         <option value="en">English</option>
@@ -302,51 +433,52 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <button onclick="saveSettings()">Save Settings</button>
-  <button class="secondary" onclick="openFullSettings()">Full Settings</button>
+  <button type="button" id="saveSettingsBtn">Save Settings</button>
+  <button type="button" class="secondary" id="openFullSettingsBtn">Full Settings</button>
 
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-
-    function toggleApiKey() {
-      const input = document.getElementById('apiKey');
-      input.type = input.type === 'password' ? 'text' : 'password';
-    }
+    let apiKeyConfigured = false;
+    let clearRequested = false;
 
     function onProviderChange() {
       const provider = document.getElementById('provider').value;
       const modelGroup = document.getElementById('modelGroup');
-      modelGroup.style.display = provider === 'openrouter' ? 'block' : 'none';
+      const apiKeyGroup = document.getElementById('apiKeyGroup');
+      modelGroup.classList.toggle('hidden', provider !== 'openrouter');
+      apiKeyGroup.classList.toggle('hidden', provider === 'ollama');
     }
 
-    function saveSettings() {
-      const provider = document.getElementById('provider').value;
-      const settings = {
-        provider,
-        autoRename: document.getElementById('autoRename').checked,
-        commandThreshold: parseInt(document.getElementById('threshold').value),
-        language: document.getElementById('language').value
-      };
-
-      const apiKey = document.getElementById('apiKey').value;
-      if (provider === 'openrouter') {
-        settings.openrouterApiKey = apiKey;
-        settings.openrouterModel = document.getElementById('model').value;
-      } else if (provider === 'openai') {
-        settings.openaiApiKey = apiKey;
-      } else if (provider === 'claude') {
-        settings.claudeApiKey = apiKey;
+    function updateApiKeyUi() {
+      const hint = document.getElementById('apiKeyHint');
+      const clearBtn = document.getElementById('clearApiKeyBtn');
+      const input = document.getElementById('apiKey');
+      if (apiKeyConfigured && !clearRequested) {
+        hint.textContent = 'API Key stored securely (enter a new value to replace)';
+        input.placeholder = '•••••••• (saved — leave blank to keep)';
+        clearBtn.classList.remove('hidden');
+      } else if (clearRequested) {
+        hint.textContent = 'API Key will be cleared on save';
+        input.placeholder = 'Enter new API Key';
+        clearBtn.classList.add('hidden');
+      } else {
+        hint.textContent = 'Stored in VS Code SecretStorage — never sent to the webview';
+        input.placeholder = 'Enter new API Key';
+        clearBtn.classList.add('hidden');
       }
-
-      vscode.postMessage({ command: 'saveSettings', settings });
     }
 
-    function openFullSettings() {
-      vscode.postMessage({ command: 'openFullSettings' });
-    }
-
-    function resetStats() {
-      vscode.postMessage({ command: 'resetStats' });
+    function updateStatus(hasKey) {
+      const status = document.getElementById('status');
+      if (hasKey) {
+        status.className = 'status success';
+        status.textContent = 'API Key configured';
+        status.classList.remove('hidden');
+      } else {
+        status.className = 'status warning';
+        status.textContent = 'Please configure API Key';
+        status.classList.remove('hidden');
+      }
     }
 
     function formatCost(cost) {
@@ -363,20 +495,51 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('totalCost').textContent = formatCost(stats.totalCost);
     }
 
-    function updateStatus(hasKey) {
-      const status = document.getElementById('status');
-      if (hasKey) {
-        status.className = 'status success';
-        status.textContent = 'API Key configured';
-        status.style.display = 'block';
-      } else {
-        status.className = 'status warning';
-        status.textContent = 'Please configure API Key';
-        status.style.display = 'block';
+    function saveSettings() {
+      const provider = document.getElementById('provider').value;
+      const settings = {
+        provider: provider,
+        autoRename: document.getElementById('autoRename').checked,
+        commandThreshold: parseInt(document.getElementById('threshold').value, 10),
+        language: document.getElementById('language').value
+      };
+
+      if (provider === 'openrouter') {
+        settings.openrouterModel = document.getElementById('model').value;
       }
+
+      const payload = { command: 'saveSettings', settings: settings };
+      const typedKey = document.getElementById('apiKey').value;
+      if (clearRequested) {
+        payload.apiKey = '';
+      } else if (typedKey) {
+        payload.apiKey = typedKey;
+      }
+
+      vscode.postMessage(payload);
+      clearRequested = false;
+      document.getElementById('apiKey').value = '';
     }
 
-    window.addEventListener('message', event => {
+    document.getElementById('provider').addEventListener('change', onProviderChange);
+    document.getElementById('toggleApiKeyBtn').addEventListener('click', function () {
+      const input = document.getElementById('apiKey');
+      input.type = input.type === 'password' ? 'text' : 'password';
+    });
+    document.getElementById('clearApiKeyBtn').addEventListener('click', function () {
+      clearRequested = true;
+      document.getElementById('apiKey').value = '';
+      updateApiKeyUi();
+    });
+    document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+    document.getElementById('openFullSettingsBtn').addEventListener('click', function () {
+      vscode.postMessage({ command: 'openFullSettings' });
+    });
+    document.getElementById('resetStatsBtn').addEventListener('click', function () {
+      vscode.postMessage({ command: 'resetStats' });
+    });
+
+    window.addEventListener('message', function (event) {
       const message = event.data;
       if (message.command === 'loadSettings') {
         const s = message.settings;
@@ -384,13 +547,18 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('autoRename').checked = s.autoRename;
         document.getElementById('threshold').value = s.commandThreshold;
         document.getElementById('language').value = s.language;
-
-        if (s.provider === 'openrouter') {
-          document.getElementById('apiKey').value = s.openrouterApiKey || '';
+        if (s.openrouterModel) {
           document.getElementById('model').value = s.openrouterModel;
-          updateStatus(!!s.openrouterApiKey);
         }
-
+        apiKeyConfigured = !!s.apiKeyConfigured;
+        clearRequested = false;
+        document.getElementById('apiKey').value = '';
+        updateApiKeyUi();
+        if (s.provider !== 'ollama') {
+          updateStatus(apiKeyConfigured);
+        } else {
+          document.getElementById('status').classList.add('hidden');
+        }
         onProviderChange();
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);
@@ -402,4 +570,13 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function getNonce(): string {
+  let text = '';
+  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  for (let i = 0; i < 32; i++) {
+    text += possible.charAt(Math.floor(Math.random() * possible.length));
+  }
+  return text;
 }

@@ -4,29 +4,32 @@ import { OpenAIProvider } from './openai';
 import { ClaudeProvider } from './claude';
 import { OllamaProvider } from './ollama';
 import { OpenRouterProvider } from './openrouter';
+import { getApiKey } from '../secrets/apiKeys';
 
 export type ProviderType = 'openai' | 'claude' | 'ollama' | 'openrouter';
 
 /**
- * 根据配置创建 AI Provider
+ * 根据配置创建 AI Provider（API Key 来自 SecretStorage）
  */
-export function createProvider(): AIProvider {
+export async function createProvider(
+  secrets: vscode.SecretStorage
+): Promise<AIProvider> {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
   const provider = config.get<ProviderType>('provider', 'openrouter');
 
   switch (provider) {
     case 'openai': {
-      const apiKey = config.get<string>('openaiApiKey', '');
+      const apiKey = await getApiKey(secrets, 'openai');
       if (!apiKey) {
-        throw new Error('请先配置 OpenAI API Key');
+        throw new Error('请先配置 OpenAI API Key（侧边栏快捷设置）');
       }
       return new OpenAIProvider(apiKey);
     }
 
     case 'claude': {
-      const apiKey = config.get<string>('claudeApiKey', '');
+      const apiKey = await getApiKey(secrets, 'claude');
       if (!apiKey) {
-        throw new Error('请先配置 Claude API Key');
+        throw new Error('请先配置 Claude API Key（侧边栏快捷设置）');
       }
       return new ClaudeProvider(apiKey);
     }
@@ -38,9 +41,9 @@ export function createProvider(): AIProvider {
     }
 
     case 'openrouter': {
-      const apiKey = config.get<string>('openrouterApiKey', '');
+      const apiKey = await getApiKey(secrets, 'openrouter');
       if (!apiKey) {
-        throw new Error('请先配置 OpenRouter API Key');
+        throw new Error('请先配置 OpenRouter API Key（侧边栏快捷设置）');
       }
       const model = config.get<string>('openrouterModel', 'google/gemini-2.5-flash');
       return new OpenRouterProvider(apiKey, model);

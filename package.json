@@ -149,7 +149,8 @@
         "terminalAiNamer.openrouterApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenRouter API Key"
+          "description": "Deprecated: OpenRouter API Key is stored in SecretStorage via the sidebar. Existing values are migrated automatically.",
+          "markdownDescription": "**Deprecated.** Prefer the sidebar Quick Settings (SecretStorage). Existing values are migrated automatically."
         },
         "terminalAiNamer.openrouterModel": {
           "type": "string",
@@ -179,12 +180,14 @@
         "terminalAiNamer.openaiApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API Key"
+          "description": "Deprecated: OpenAI API Key is stored in SecretStorage via the sidebar. Existing values are migrated automatically.",
+          "markdownDescription": "**Deprecated.** Prefer the sidebar Quick Settings (SecretStorage). Existing values are migrated automatically."
         },
         "terminalAiNamer.claudeApiKey": {
           "type": "string",
           "default": "",
-          "description": "Claude API Key"
+          "description": "Deprecated: Claude API Key is stored in SecretStorage via the sidebar. Existing values are migrated automatically.",
+          "markdownDescription": "**Deprecated.** Prefer the sidebar Quick Settings (SecretStorage). Existing values are migrated automatically."
         },
         "terminalAiNamer.ollamaEndpoint": {
           "type": "string",
