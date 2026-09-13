@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 interface TerminalData {
   commands: string[];
   named: boolean;
+  namingInProgress: boolean;
 }
 
 /**
@@ -11,11 +12,17 @@ interface TerminalData {
 export class TerminalTracker {
   private terminalDataMap = new Map<vscode.Terminal, TerminalData>();
   private disposables: vscode.Disposable[] = [];
-  private onCommandThresholdReached: (terminal: vscode.Terminal, commands: string[]) => void;
+  private onCommandThresholdReached: (
+    terminal: vscode.Terminal,
+    commands: string[]
+  ) => boolean | void | Promise<boolean | void>;
   private commandThreshold: number;
 
   constructor(
-    onCommandThresholdReached: (terminal: vscode.Terminal, commands: string[]) => void
+    onCommandThresholdReached: (
+      terminal: vscode.Terminal,
+      commands: string[]
+    ) => boolean | void | Promise<boolean | void>
   ) {
     this.onCommandThresholdReached = onCommandThresholdReached;
     this.commandThreshold = this.getCommandThreshold();
@@ -32,7 +39,11 @@ export class TerminalTracker {
     // 监听终端创建
     this.disposables.push(
       vscode.window.onDidOpenTerminal((terminal) => {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, {
+          commands: [],
+          named: false,
+          namingInProgress: false
+        });
       })
     );
 
@@ -61,7 +72,11 @@ export class TerminalTracker {
     // 初始化已存在的终端
     vscode.window.terminals.forEach((terminal) => {
       if (!this.terminalDataMap.has(terminal)) {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, {
+          commands: [],
+          named: false,
+          namingInProgress: false
+        });
       }
     });
 
@@ -91,7 +106,7 @@ export class TerminalTracker {
 
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = { commands: [], named: false, namingInProgress: false };
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -107,10 +122,28 @@ export class TerminalTracker {
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const autoRename = config.get<boolean>('autoRename', true);
 
-    if (autoRename && !data.named && data.commands.length >= this.commandThreshold) {
-      // 触发命名回调
-      this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold));
-      data.named = true;
+    if (
+      autoRename &&
+      !data.named &&
+      !data.namingInProgress &&
+      data.commands.length >= this.commandThreshold
+    ) {
+      // Hold a rename lock until the async callback reports success/failure.
+      // Do not mark named=true before rename completes — a skipped rename must
+      // remain eligible for a later auto-rename attempt.
+      data.namingInProgress = true;
+      const commandsSnapshot = data.commands.slice(0, this.commandThreshold);
+      void Promise.resolve(this.onCommandThresholdReached(terminal, commandsSnapshot))
+        .then((result) => {
+          // Only permanent-named on explicit success; skipped/failed renames stay eligible.
+          data!.named = result === true;
+        })
+        .catch(() => {
+          data!.named = false;
+        })
+        .finally(() => {
+          data!.namingInProgress = false;
+        });
     }
   }
 
@@ -120,7 +153,7 @@ export class TerminalTracker {
   addCommand(terminal: vscode.Terminal, command: string) {
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = { commands: [], named: false, namingInProgress: false };
       this.terminalDataMap.set(terminal, data);
     }
 
