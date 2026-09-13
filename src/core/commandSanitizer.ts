@@ -13,7 +13,7 @@ export interface SanitizeOptions {
 const DEFAULT_MAX_LENGTH = 120;
 
 const SECRET_ENV_NAME =
-  /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|BEARER|AUTH|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|(?:^|_)KEY(?:_|$))/i;
+  /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|BEARER|AUTH|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|MYSQL_PWD|PGPASSWORD|_PWD$|(?:^|_)KEY(?:_|$))/i;
 
 /** True when `i` can start a shell assignment (start of string or non-identifier). */
 function canStartAssignment(s: string, i: number): boolean {
@@ -117,9 +117,67 @@ function skipBacktick(s: string, i: number): number {
 }
 
 /**
+ * Advance past a balanced `${...}` brace expansion starting at `i`
+ * (s[i] === '$' and s[i+1] === '{'). Handles nested braces and quotes so
+ * forms like `${FALLBACK:-correct horse battery}` stay one shell word.
+ */
+function skipDollarBrace(s: string, i: number): number {
+  // s[i] === '$', s[i+1] === '{'
+  i += 2;
+  let depth = 1;
+  while (i < s.length && depth > 0) {
+    const c = s[i]!;
+    if (c === '\\' && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === '\\' && q === '"' && i + 1 < s.length) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i < s.length) {
+        i++;
+      }
+      continue;
+    }
+    if (c === '`') {
+      i = skipBacktick(s, i);
+      continue;
+    }
+    if (c === '$' && s[i + 1] === '{') {
+      depth++;
+      i += 2;
+      continue;
+    }
+    if (c === '$' && s[i + 1] === '(') {
+      i = skipDollarParen(s, i);
+      continue;
+    }
+    if (c === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === '}') {
+      depth--;
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+/**
  * Advance past one shell word: quoted segments (with internal whitespace),
  * concatenations such as `correct" horse battery"`, escapes (`a\ b`), and
- * `$()` / `` ` `` substitutions. Unquoted whitespace ends the word.
+ * `$()` / `${...}` / `` ` `` substitutions. Unquoted whitespace ends the word.
  */
 function skipShellWord(s: string, i: number): number {
   if (i >= s.length || /\s/.test(s[i]!)) {
@@ -138,9 +196,13 @@ function skipShellWord(s: string, i: number): number {
       const q = c;
       i++;
       while (i < s.length && s[i] !== q) {
-        // Inside double quotes, backslash escapes the next character.
-        // Inside single quotes, backslash is literal (bash).
-        if (s[i] === '\\' && q === '"' && i + 1 < s.length) {
+        // Inside double quotes, bash only treats \ before $ ` " \ as escapes.
+        if (
+          s[i] === '\\' &&
+          q === '"' &&
+          i + 1 < s.length &&
+          /[$`"\\]/.test(s[i + 1]!)
+        ) {
           i += 2;
         } else {
           i++;
@@ -156,6 +218,10 @@ function skipShellWord(s: string, i: number): number {
       i = skipDollarParen(s, i);
       continue;
     }
+    if (c === '$' && s[i + 1] === '{') {
+      i = skipDollarBrace(s, i);
+      continue;
+    }
     if (c === '`') {
       i = skipBacktick(s, i);
       continue;
@@ -167,6 +233,83 @@ function skipShellWord(s: string, i: number): number {
     i++;
   }
   return i;
+}
+
+/**
+ * Decode a shell word's quotes/escapes into the logical path/token text.
+ * Inside double quotes, only bash-special escapes (`$`, `` ` ``, `"`, `\`) are consumed.
+ */
+function unquoteShellWord(word: string): string {
+  let result = '';
+  let i = 0;
+  while (i < word.length) {
+    const c = word[i]!;
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      while (i < word.length && word[i] !== q) {
+        if (
+          word[i] === '\\' &&
+          q === '"' &&
+          i + 1 < word.length &&
+          /[$`"\\]/.test(word[i + 1]!)
+        ) {
+          result += word[i + 1];
+          i += 2;
+        } else {
+          result += word[i];
+          i++;
+        }
+      }
+      if (i < word.length) {
+        i++; // closing quote
+      }
+      continue;
+    }
+    if (c === '\\' && i + 1 < word.length) {
+      result += word[i + 1];
+      i += 2;
+      continue;
+    }
+    result += c;
+    i++;
+  }
+  return result;
+}
+
+/** JSON object keys that typically hold secrets in curl -d / --data bodies. */
+const JSON_SECRET_KEYS = [
+  'password',
+  'passwd',
+  'pass',
+  'secret',
+  'token',
+  'api[_-]?key',
+  'access[_-]?key',
+  'auth',
+  'credentials?',
+  'bearer',
+].join('|');
+
+const JSON_SECRET_KEY = new RegExp(
+  `(["'])(${JSON_SECRET_KEYS})\\1\\s*:\\s*(["'])((?:\\\\.|(?!\\3).)*)\\3`,
+  'gi'
+);
+
+/** Same keys when the history line still has shell-escaped quotes: {\\"token\\":\\"x\\"}. */
+const JSON_SECRET_KEY_ESCAPED = new RegExp(
+  `\\\\"(${JSON_SECRET_KEYS})\\\\"\\s*:\\s*\\\\"((?:\\\\.|[^"\\\\])*)\\\\"`,
+  'gi'
+);
+
+function redactJsonSecrets(command: string): string {
+  let result = command.replace(JSON_SECRET_KEY, (_m, q1: string, key: string, q2: string) => {
+    return `${q1}${key}${q1}:${q2}${REDACTED}${q2}`;
+  });
+  result = result.replace(JSON_SECRET_KEY_ESCAPED, (_m, key: string) => {
+    return `\\"${key}\\":\\"${REDACTED}\\"`;
+  });
+  return result;
 }
 
 /**
@@ -221,6 +364,7 @@ function skipLeadingAssignments(command: string): string {
 /**
  * Extract argv0 (command name) from a shell command line.
  * Strips env assignments and path prefixes: `FOO=1 /usr/bin/npm run` → `npm`
+ * Quotes and escapes are honored so `"/path with spaces/bin/tool"` → `tool`.
  */
 export function extractArgv0(command: string): string {
   const trimmed = command.trim();
@@ -229,7 +373,13 @@ export function extractArgv0(command: string): string {
   }
 
   const withoutEnv = skipLeadingAssignments(trimmed);
-  const first = withoutEnv.split(/\s+/)[0] || '';
+  if (!withoutEnv) {
+    return '';
+  }
+
+  const firstEnd = skipShellWord(withoutEnv, 0);
+  const firstRaw = withoutEnv.slice(0, firstEnd);
+  const first = unquoteShellWord(firstRaw);
   // Drop path: /usr/bin/npm → npm, .\foo.cmd → foo.cmd
   const base = first.replace(/^.*[/\\]/, '');
   return base || first;
@@ -304,11 +454,23 @@ function redactSecretFlags(command: string): string {
     const flag = flagMatch[1]!;
     let j = i + flag.length;
 
-    // Single-letter flags like `-pPASSWORD` / `-uroot` are compact forms.
-    // Only treat `-p`/`-u` as spaced/equals flags; leave glued tokens for
-    // COMPACT_PASSWORD_FLAG (and ordinary copying for `-uuser`).
+    // Single-letter flags like `-pPASSWORD` / `-uadmin:hunter2` are compact forms.
+    // `-p` glued passwords are handled by COMPACT_PASSWORD_FLAG below.
+    // Glued `-uuser:password` (curl) is redacted here; plain `-uroot` (mysql user) is left.
     const isSingleLetter = /^-[pu]$/i.test(flag);
     if (isSingleLetter && j < s.length && !/[\s=]/.test(s[j]!)) {
+      if (/^-u$/i.test(flag)) {
+        const valueStart = j;
+        while (j < s.length && !/\s/.test(s[j]!)) {
+          j++;
+        }
+        const glued = s.slice(valueStart, j);
+        if (glued.includes(':')) {
+          result += `${flag}${REDACTED}`;
+          i = j;
+          continue;
+        }
+      }
       while (i < s.length && !/\s/.test(s[i]!)) {
         result += s[i];
         i++;
@@ -374,6 +536,8 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
   // Compact -pPASSWORD (including numeric passwords like -p123456).
   // Spaced forms such as `ps -p 123` are handled above / left as process selectors.
   result = result.replace(COMPACT_PASSWORD_FLAG, () => ` -p${REDACTED}`);
+
+  result = redactJsonSecrets(result);
 
   result = result.replace(URL_EMBEDDED_CREDS, '://[REDACTED]@');
   result = result.replace(USERINFO_CREDS, '$1:[REDACTED]@');

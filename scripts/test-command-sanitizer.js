@@ -102,6 +102,85 @@ console.log('commandSanitizer');
   const long = sanitizeCommand('curl --user admin:hunter2 https://example.com');
   assertIncludes(long, '[REDACTED]', 'redacts curl --user credentials');
   assertNotIncludes(long, 'hunter2', 'removes curl --user password');
+
+  const glued = sanitizeCommand('curl -uadmin:hunter2 https://example.com');
+  assertIncludes(glued, '[REDACTED]', 'redacts glued curl -u credentials');
+  assertNotIncludes(glued, 'hunter2', 'removes glued curl -u password');
+  assertNotIncludes(glued, 'admin:', 'removes glued curl -u userinfo');
+}
+
+{
+  console.log('\nbrace expansion assignments');
+  const brace = sanitizeCommand(
+    'API_KEY=${FALLBACK:-correct horse battery} npm test'
+  );
+  assertIncludes(brace, '[REDACTED]', 'redacts brace-expansion API_KEY assignment');
+  assertNotIncludes(brace, 'correct', 'removes brace default secret head');
+  assertNotIncludes(brace, 'horse', 'removes brace default secret mid');
+  assertNotIncludes(brace, 'battery', 'removes brace default secret tail');
+  assertIncludes(brace, 'npm test', 'keeps command after brace assignment');
+  assert(
+    extractArgv0('API_KEY=${FALLBACK:-correct horse battery} npm test') === 'npm',
+    'extractArgv0 skips brace-expansion assignment'
+  );
+  assert(
+    sanitizeCommand('API_KEY=${FALLBACK:-correct horse battery} npm test', {
+      argv0Only: true,
+    }) === 'npm',
+    'argv0Only does not leak brace-expansion fragments'
+  );
+}
+
+{
+  console.log('\nquoted executable paths (argv0)');
+  assert(
+    extractArgv0('"/home/alice/Customer Secret/bin/deploy" --token hunter2') ===
+      'deploy',
+    'extractArgv0 keeps basename of quoted unix path with spaces'
+  );
+  assert(
+    extractArgv0('"C:\\Users\\Alice Smith\\bin\\tool.exe" --token x') === 'tool.exe',
+    'extractArgv0 keeps basename of quoted windows path with spaces'
+  );
+  assert(
+    sanitizeCommand('"/home/alice/Customer Secret/bin/deploy" --token hunter2', {
+      argv0Only: true,
+    }) === 'deploy',
+    'argv0Only does not leak quoted path directory fragments'
+  );
+}
+
+{
+  console.log('\nJSON request-body secrets');
+  const jsonBody = sanitizeCommand(
+    `curl -d '{"password":"hunter2"}' https://api.example.com/login`
+  );
+  assertIncludes(jsonBody, '[REDACTED]', 'redacts JSON password in -d body');
+  assertNotIncludes(jsonBody, 'hunter2', 'removes JSON password value');
+  assertIncludes(jsonBody, 'password', 'keeps JSON key name');
+
+  const tokenBody = sanitizeCommand(
+    `curl --data "{\\"token\\":\\"abc123secret\\"}" https://api.example.com`
+  );
+  assertIncludes(tokenBody, '[REDACTED]', 'redacts JSON token in --data body');
+  assertNotIncludes(tokenBody, 'abc123secret', 'removes JSON token value');
+}
+
+{
+  console.log('\nMYSQL_PWD / PGPASSWORD env secrets');
+  const mysqlPwd = sanitizeCommand('MYSQL_PWD=hunter2 mysql -uroot');
+  assertIncludes(mysqlPwd, '[REDACTED]', 'redacts MYSQL_PWD assignment');
+  assertNotIncludes(mysqlPwd, 'hunter2', 'removes MYSQL_PWD value');
+  assertIncludes(mysqlPwd, 'mysql -uroot', 'keeps mysql command');
+
+  const pgPwd = sanitizeCommand('PGPASSWORD=s3cret psql -h localhost');
+  assertIncludes(pgPwd, '[REDACTED]', 'redacts PGPASSWORD assignment');
+  assertNotIncludes(pgPwd, 's3cret', 'removes PGPASSWORD value');
+
+  // Bare PWD is a working-directory variable, not a credential name.
+  const barePwd = sanitizeCommand('PWD=/tmp/workdir ls');
+  assertNotIncludes(barePwd, '[REDACTED]', 'does not redact bare PWD');
+  assertIncludes(barePwd, '/tmp/workdir', 'keeps working-directory PWD value');
 }
 
 {
