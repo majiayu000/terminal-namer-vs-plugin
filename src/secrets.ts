@@ -426,6 +426,36 @@ export async function getApiKeySource(
   return secret ? 'secret' : 'none';
 }
 
+/**
+ * Sidebar status across every workspace folder so multi-root retained plaintext
+ * is not hidden behind workspaceFolders[0] (which may be secret-only or an
+ * explicit empty override while another folder still has a usable legacy key).
+ *
+ * Prefer `legacy` over `secret` when any folder still uses plaintext; otherwise
+ * report `secret` if any folder can resolve a key.
+ */
+export async function getAggregatedApiKeySource(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider
+): Promise<ApiKeySource> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) {
+    return getApiKeySource(context, provider);
+  }
+
+  let sawSecret = false;
+  for (const folder of folders) {
+    const source = await getApiKeySource(context, provider, folder.uri);
+    if (source === 'legacy') {
+      return 'legacy';
+    }
+    if (source === 'secret') {
+      sawSecret = true;
+    }
+  }
+  return sawSecret ? 'secret' : 'none';
+}
+
 function readScopedString(
   inspect: InspectedString,
   target: vscode.ConfigurationTarget

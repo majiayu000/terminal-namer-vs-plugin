@@ -5,7 +5,7 @@ import {
   ApiKeySource,
   clearLegacyApiKeySettings,
   deleteApiKey,
-  getApiKeySource,
+  getAggregatedApiKeySource,
   setApiKey,
 } from '../secrets';
 
@@ -131,8 +131,10 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     const secretProvider = this._providerFromSettings(provider);
+    // Aggregate across folders: a resource-less lookup falls back to
+    // workspaceFolders[0] and can mislabel or hide Clear for other roots.
     const apiKeySource: ApiKeySource = secretProvider
-      ? await getApiKeySource(this._context, secretProvider)
+      ? await getAggregatedApiKeySource(this._context, secretProvider)
       : 'none';
 
     this._view.webview.postMessage({
@@ -186,7 +188,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     const apiKeySource: ApiKeySource =
       provider === 'ollama'
         ? 'none'
-        : await getApiKeySource(
+        : await getAggregatedApiKeySource(
             this._context,
             provider === 'openai' || provider === 'claude' ? provider : 'openrouter'
           );
