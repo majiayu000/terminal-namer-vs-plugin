@@ -53,6 +53,29 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.onDidChangeActiveTerminal(() => terminalTreeProvider?.refresh())
     );
 
+    // When the user enables consent via Settings UI, bind the destination fingerprint
+    // so auto-rename is not stuck pending forever without a modal.
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(async (e) => {
+        if (!e.affectsConfiguration('terminalAiNamer.allowSendCommandHistory')) {
+          return;
+        }
+        const config = vscode.workspace.getConfiguration('terminalAiNamer');
+        const inspected = config.inspect<boolean>('allowSendCommandHistory');
+        if (inspected?.globalValue === true) {
+          const existing = context.globalState.get<string>(CONSENT_DESTINATION_KEY);
+          if (!existing) {
+            await context.globalState.update(
+              CONSENT_DESTINATION_KEY,
+              getHistoryDestinationFingerprint()
+            );
+          }
+        } else {
+          await context.globalState.update(CONSENT_DESTINATION_KEY, undefined);
+        }
+      })
+    );
+
     // 注册命令：打开设置面板（打开 VSCode 设置）
     const openSettingsCmd = vscode.commands.registerCommand(
       'terminalAiNamer.openSettings',

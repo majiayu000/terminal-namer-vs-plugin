@@ -311,6 +311,83 @@ console.log('commandSanitizer');
     'hunter2',
     'sanitized mode redacts PowerShell $env: secret'
   );
+  assert(
+    extractArgv0('$env:API_KEY=hunter2;echo "Customer Secret"') === 'echo',
+    'extractArgv0 stops PowerShell assignment at semicolon'
+  );
+  assertNotIncludes(
+    sanitizeCommand('$env:API_KEY=hunter2;echo "Customer Secret"', { argv0Only: true }),
+    'Customer Secret',
+    'argv0Only does not leak args after PowerShell semicolon assignment'
+  );
+  assert(
+    extractArgv0("prefix$(printf 'Customer Secret') --token hunter2") === '[cmd]',
+    'extractArgv0 rejects concatenated substitution in argv0'
+  );
+  assert(
+    extractArgv0('>"/tmp/Customer Secret.log" npm run dev') === 'npm',
+    'extractArgv0 skips leading redirection'
+  );
+  assert(
+    extractArgv0('<input-secret.txt python train.py') === 'python',
+    'extractArgv0 skips leading input redirection'
+  );
+  assert(
+    extractArgv0("API_KEY=(correct 'horse battery'); npm test") === 'npm',
+    'extractArgv0 skips parenthesized array assignment'
+  );
+  assertNotIncludes(
+    sanitizeCommand("API_KEY=(correct 'horse battery'); npm test"),
+    'horse',
+    'redacts parenthesized array assignment secrets'
+  );
+  assertNotIncludes(
+    sanitizeCommand("API_KEY=<(printf 'correct horse'); npm test"),
+    'horse',
+    'redacts process-substitution assignment secrets'
+  );
+}
+
+{
+  console.log('\nquoted secret flag names');
+  const quotedName = sanitizeCommand('tool "--password" hunter2 run');
+  assertIncludes(quotedName, '[REDACTED]', 'redacts quoted --password flag name');
+  assertNotIncludes(quotedName, 'hunter2', 'removes value after quoted flag name');
+  assertIncludes(quotedName, 'run', 'keeps trailing args after quoted flag name');
+
+  const composed = sanitizeCommand('tool --pass"word" hunter2 run');
+  assertIncludes(composed, '[REDACTED]', 'redacts composed quoted secret flag name');
+  assertNotIncludes(composed, 'hunter2', 'removes value after composed flag name');
+}
+
+{
+  console.log('\nnumeric JSON secrets and cookies');
+  const numericJson = sanitizeCommand(`curl -d '{"password":123456}' https://example.com`);
+  assertIncludes(numericJson, '[REDACTED]', 'redacts numeric JSON password');
+  assertNotIncludes(numericJson, '123456', 'removes numeric JSON password value');
+
+  const cookieH = sanitizeCommand("curl -H 'Cookie: sessionid=hunter2' https://example.com");
+  assertIncludes(cookieH, '[REDACTED]', 'redacts Cookie header');
+  assertNotIncludes(cookieH, 'hunter2', 'removes Cookie header value');
+
+  const cookieB = sanitizeCommand('curl -b sessionid=hunter2 https://example.com');
+  assertIncludes(cookieB, '[REDACTED]', 'redacts curl -b cookie data');
+  assertNotIncludes(cookieB, 'hunter2', 'removes curl -b cookie value');
+}
+
+{
+  console.log('\nshort credential flags stay contextual');
+  const pythonU = sanitizeCommand('python -u train.py');
+  assertIncludes(pythonU, 'train.py', 'keeps python -u filename');
+  assertNotIncludes(pythonU, '[REDACTED]', 'does not redact python -u');
+
+  const sortU = sanitizeCommand('sort -u customers.txt');
+  assertIncludes(sortU, 'customers.txt', 'keeps sort -u filename');
+  assertNotIncludes(sortU, '[REDACTED]', 'does not redact sort -u');
+
+  const findP = sanitizeCommand('find . -print');
+  assertIncludes(findP, '-print', 'keeps find -print');
+  assertNotIncludes(findP, '[REDACTED]', 'does not redact find -print as -p');
 }
 
 {

@@ -23,14 +23,18 @@ function canStartAssignment(s: string, i: number): boolean {
   return !/[A-Za-z0-9_]/.test(s[i - 1]!);
 }
 
-/** Authorization / Bearer / Basic / X-Api-Key style header names */
-const AUTH_HEADER_NAME = /(?:Authorization|X-Api-Key|X-Auth-Token)/gi;
+/** Authorization / Bearer / Basic / X-Api-Key / Cookie style header names */
+const AUTH_HEADER_NAME = /(?:Authorization|X-Api-Key|X-Auth-Token|Cookie)/gi;
 
-/** Common password / token / user CLI flags with their values */
+/** Common password / token / user / cookie CLI flags with their values */
 const SECRET_FLAG_NAMES =
-  '-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth|-u|--user';
+  '-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth|-u|--user|-b|--cookie';
 
-const SECRET_FLAG_PREFIX = new RegExp(`^(${SECRET_FLAG_NAMES})`, 'i');
+const SECRET_FLAG_EXACT = new RegExp(`^(${SECRET_FLAG_NAMES})$`, 'i');
+
+/** Commands where short `-p` / `-u` typically carry credentials (not python -u, sort -u, …). */
+const CREDENTIAL_SHORT_FLAG_COMMANDS =
+  /(^|[\s/\\])(curl|wget|mysql|mysqldump|mariadb|psql|pg_dump|mongo|mongosh|redis-cli|mycli)(?=\s|$)/i;
 
 /** mysql/psql style -pPASSWORD (no space). Glued form is password-bearing; `ps -p 123` uses a space. */
 const COMPACT_PASSWORD_FLAG = /(?:^|\s)-p(?!$)([^\s-][^\s]*)/g;
@@ -174,13 +178,85 @@ function skipDollarBrace(s: string, i: number): number {
 }
 
 /**
- * Advance past one shell word: quoted segments (with internal whitespace),
- * concatenations such as `correct" horse battery"`, escapes (`a\ b`), and
- * `$()` / `${...}` / `` ` `` substitutions. Unquoted whitespace ends the word.
+ * Advance past a balanced `(...)` group starting at `i` (s[i] === '(').
+ * Used for array assignments and process-substitution operands.
  */
-function skipShellWord(s: string, i: number): number {
+function skipBalancedParen(s: string, i: number): number {
+  // s[i] === '('
+  i++;
+  let depth = 1;
+  while (i < s.length && depth > 0) {
+    const c = s[i]!;
+    if (c === '\\' && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === '\\' && q === '"' && i + 1 < s.length) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i < s.length) {
+        i++;
+      }
+      continue;
+    }
+    if (c === '`') {
+      i = skipBacktick(s, i);
+      continue;
+    }
+    if (c === '$' && s[i + 1] === '(') {
+      i = skipDollarParen(s, i);
+      continue;
+    }
+    if (c === '$' && s[i + 1] === '{') {
+      i = skipDollarBrace(s, i);
+      continue;
+    }
+    if (c === '(') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === ')') {
+      depth--;
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+export type SkipShellWordOptions = {
+  /** When true, unquoted `;` ends the word (PowerShell statement separator). */
+  stopAtSemicolon?: boolean;
+};
+
+/**
+ * Advance past one shell word: quoted segments (with internal whitespace),
+ * concatenations such as `correct" horse battery"`, escapes (`a\ b`),
+ * `$()` / `${...}` / `` ` `` substitutions, and parenthesized groups.
+ * Unquoted whitespace ends the word.
+ */
+function skipShellWord(s: string, i: number, options: SkipShellWordOptions = {}): number {
   if (i >= s.length || /\s/.test(s[i]!)) {
     return i;
+  }
+
+  // Lone statement/pipeline separators are one-character tokens so callers
+  // (flag/env scanners) always advance past them.
+  const lead = s[i]!;
+  if (lead === ';' || lead === '&' || lead === '|') {
+    if ((lead === '&' || lead === '|') && s[i + 1] === lead) {
+      return i + 2;
+    }
+    return i + 1;
   }
 
   while (i < s.length) {
@@ -188,6 +264,13 @@ function skipShellWord(s: string, i: number): number {
 
     // Unquoted whitespace terminates the word
     if (/\s/.test(c)) {
+      break;
+    }
+    // Unquoted statement/pipeline separators end the word (bash and PowerShell).
+    if (c === ';' || c === '&' || c === '|') {
+      break;
+    }
+    if (options.stopAtSemicolon && c === ';') {
       break;
     }
 
@@ -223,6 +306,15 @@ function skipShellWord(s: string, i: number): number {
     }
     if (c === '`') {
       i = skipBacktick(s, i);
+      continue;
+    }
+    // Process substitution `<(...)` / `>(...)` and array `(...)` groups.
+    if ((c === '<' || c === '>') && s[i + 1] === '(') {
+      i = skipBalancedParen(s, i + 1);
+      continue;
+    }
+    if (c === '(') {
+      i = skipBalancedParen(s, i);
       continue;
     }
     if (c === '\\' && i + 1 < s.length) {
@@ -291,22 +383,31 @@ const JSON_SECRET_KEYS = [
 ].join('|');
 
 const JSON_SECRET_KEY = new RegExp(
-  `(["'])(${JSON_SECRET_KEYS})\\1\\s*:\\s*(["'])((?:\\\\.|(?!\\3).)*)\\3`,
+  `(["'])(${JSON_SECRET_KEYS})\\1\\s*:\\s*(?:(["'])((?:\\\\.|(?!\\3).)*)\\3|(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null))`,
   'gi'
 );
 
 /** Same keys when the history line still has shell-escaped quotes: {\\"token\\":\\"x\\"}. */
 const JSON_SECRET_KEY_ESCAPED = new RegExp(
-  `\\\\"(${JSON_SECRET_KEYS})\\\\"\\s*:\\s*\\\\"((?:\\\\.|[^"\\\\])*)\\\\"`,
+  `\\\\"(${JSON_SECRET_KEYS})\\\\"\\s*:\\s*(?:\\\\"((?:\\\\.|[^"\\\\])*)\\\\"|(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null))`,
   'gi'
 );
 
 function redactJsonSecrets(command: string): string {
-  let result = command.replace(JSON_SECRET_KEY, (_m, q1: string, key: string, q2: string) => {
-    return `${q1}${key}${q1}:${q2}${REDACTED}${q2}`;
-  });
-  result = result.replace(JSON_SECRET_KEY_ESCAPED, (_m, key: string) => {
-    return `\\"${key}\\":\\"${REDACTED}\\"`;
+  let result = command.replace(
+    JSON_SECRET_KEY,
+    (_m, q1: string, key: string, q2: string | undefined) => {
+      if (q2) {
+        return `${q1}${key}${q1}:${q2}${REDACTED}${q2}`;
+      }
+      return `${q1}${key}${q1}:${REDACTED}`;
+    }
+  );
+  result = result.replace(JSON_SECRET_KEY_ESCAPED, (_m, key: string, strVal: string | undefined) => {
+    if (strVal !== undefined) {
+      return `\\"${key}\\":\\"${REDACTED}\\"`;
+    }
+    return `\\"${key}\\":${REDACTED}`;
   });
   return result;
 }
@@ -327,7 +428,7 @@ function redactEnvAssignments(command: string): string {
       const ps = rest.match(/^(\$env:)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)/i);
       if (ps && SECRET_ENV_NAME.test(ps[2]!)) {
         const valueStart = i + ps[0].length;
-        const valueEnd = skipShellWord(s, valueStart);
+        const valueEnd = skipShellWord(s, valueStart, { stopAtSemicolon: true });
         result += `${ps[1]}${ps[2]}=${REDACTED}`;
         i = valueEnd;
         continue;
@@ -364,7 +465,7 @@ function skipLeadingAssignments(command: string): string {
     const ps = rest.match(/^\$env:[A-Za-z_][A-Za-z0-9_]*\s*=\s*/i);
     if (ps) {
       i += ps[0].length;
-      i = skipShellWord(s, i);
+      i = skipShellWord(s, i, { stopAtSemicolon: true });
       while (i < s.length && /\s/.test(s[i]!)) {
         i++;
       }
@@ -379,6 +480,44 @@ function skipLeadingAssignments(command: string): string {
     }
     i += m[0].length;
     i = skipShellWord(s, i);
+    while (i < s.length && /\s/.test(s[i]!)) {
+      i++;
+    }
+    if (s[i] === ';') {
+      i++;
+    }
+  }
+  return s.slice(i).trimStart();
+}
+
+/**
+ * Skip leading shell redirections (`>file`, `<in`, `>>log`, `2>err`, `&>out`, …)
+ * and their operands so argv0 is the executable, not a redirected path.
+ */
+function skipLeadingRedirections(command: string): string {
+  let i = 0;
+  const s = command;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i]!)) {
+      i++;
+    }
+    const rest = s.slice(i);
+    // Optional fd number, then redirection operator.
+    const redir = rest.match(/^(\d*)(?:>>|&>|>&|<|>)/);
+    if (!redir) {
+      break;
+    }
+    i += redir[0].length;
+    while (i < s.length && /\s/.test(s[i]!)) {
+      i++;
+    }
+    // `>&1` / `2>&1` style — digit already consumed as part of op when `>&`.
+    // If operand remains, consume one shell word.
+    if (i < s.length && !/[;&|]/.test(s[i]!)) {
+      // Bare `>&1` already matched via `>&` + digit left; if next is a digit-only
+      // fd with no further path, skipShellWord still advances one token.
+      i = skipShellWord(s, i);
+    }
   }
   return s.slice(i).trimStart();
 }
@@ -399,10 +538,15 @@ export function extractArgv0(command: string): string {
     return '';
   }
 
-  const firstEnd = skipShellWord(withoutEnv, 0);
-  const firstRaw = withoutEnv.slice(0, firstEnd);
-  // Command substitutions used as argv0 must not leak their source text/args.
-  if (/^\$\(/.test(firstRaw) || /^`/.test(firstRaw)) {
+  const withoutRedirs = skipLeadingRedirections(withoutEnv);
+  if (!withoutRedirs) {
+    return '';
+  }
+
+  const firstEnd = skipShellWord(withoutRedirs, 0);
+  const firstRaw = withoutRedirs.slice(0, firstEnd);
+  // Command substitutions anywhere in argv0 must not leak their source text/args.
+  if (/\$\(|`|\$\{/.test(firstRaw)) {
     return '[cmd]';
   }
   const first = unquoteShellWord(firstRaw);
@@ -522,75 +666,92 @@ function skipFlagValue(s: string, i: number): number {
 }
 
 /**
- * Redact secret CLI flags, including quoted values with whitespace
- * (e.g. `--password "correct horse battery staple"`).
+ * Redact secret CLI flags, including quoted option names and values
+ * (e.g. `"--password" "correct horse"` or `--pass"word" hunter2`).
  */
 function redactSecretFlags(command: string): string {
   let result = '';
   let i = 0;
   const s = command;
+  const credentialCommand = CREDENTIAL_SHORT_FLAG_COMMANDS.test(s);
 
   while (i < s.length) {
-    // Preserve leading whitespace for this token region
     if (/\s/.test(s[i]!)) {
       result += s[i];
       i++;
       continue;
     }
 
-    const rest = s.slice(i);
-    const flagMatch = rest.match(SECRET_FLAG_PREFIX);
-    if (!flagMatch) {
-      // Copy until next whitespace (ordinary token)
-      while (i < s.length && !/\s/.test(s[i]!)) {
-        result += s[i];
-        i++;
+    const wordEnd = skipShellWord(s, i);
+    const wordRaw = s.slice(i, wordEnd);
+    const word = unquoteShellWord(wordRaw);
+    const eqIdx = word.indexOf('=');
+
+    let flag: string | undefined;
+    let gluedValue: string | undefined;
+
+    if (eqIdx >= 0) {
+      const flagPart = word.slice(0, eqIdx);
+      if (SECRET_FLAG_EXACT.test(flagPart)) {
+        flag = flagPart;
+        gluedValue = word.slice(eqIdx + 1);
       }
+    } else if (SECRET_FLAG_EXACT.test(word)) {
+      flag = word;
+    } else {
+      const glued = word.match(/^(-[pub])(.+)$/i);
+      if (glued) {
+        flag = glued[1]!;
+        gluedValue = glued[2]!;
+      }
+    }
+
+    if (!flag) {
+      result += wordRaw;
+      i = wordEnd;
       continue;
     }
 
-    const flag = flagMatch[1]!;
-    let j = i + flag.length;
+    const isShortCred = /^-[pub]$/i.test(flag);
 
-    // Single-letter flags like `-pPASSWORD` / `-uadmin:hunter2` are compact forms.
-    // Glued `-uuser:password` (curl) is redacted here; plain `-uroot` (mysql user) is left.
-    // Glued `-p"correct horse"` must consume a full shell word so the passphrase cannot leak.
-    const isSingleLetter = /^-[pu]$/i.test(flag);
-    if (isSingleLetter && j < s.length && !/[\s=]/.test(s[j]!)) {
-      if (/^-u$/i.test(flag)) {
-        const valueStart = j;
-        while (j < s.length && !/\s/.test(s[j]!)) {
-          j++;
-        }
-        const glued = s.slice(valueStart, j);
-        if (glued.includes(':')) {
-          result += `${flag}${REDACTED}`;
-          i = j;
-          continue;
-        }
-      }
-      if (/^-p$/i.test(flag)) {
-        const valueEnd = skipShellWord(s, j);
+    // Short flags on non-credential commands: only redact glued curl `-uuser:pass`.
+    // Do not treat `-print` / `python -u` / `sort -u` as secrets.
+    if (isShortCred && !credentialCommand) {
+      if (/^-u$/i.test(flag) && gluedValue !== undefined && gluedValue.includes(':')) {
         result += `${flag}${REDACTED}`;
-        i = valueEnd;
+        i = wordEnd;
         continue;
       }
-      while (i < s.length && !/\s/.test(s[i]!)) {
-        result += s[i];
-        i++;
-      }
+      result += wordRaw;
+      i = wordEnd;
       continue;
     }
 
-    // `--password=value` or `--password value` / `--password "quoted value"`
-    if (s[j] === '=') {
-      j++;
-      j = skipFlagValue(s, j);
+    if (eqIdx >= 0) {
       result += `${flag}=${REDACTED}`;
-      i = j;
+      i = wordEnd;
       continue;
     }
 
+    if (gluedValue !== undefined) {
+      if (/^-u$/i.test(flag)) {
+        if (gluedValue.includes(':')) {
+          result += `${flag}${REDACTED}`;
+        } else {
+          // mysql `-uroot` (user only) — keep
+          result += wordRaw;
+        }
+        i = wordEnd;
+        continue;
+      }
+      // `-pPASSWORD`, `-bsession=…`
+      result += `${flag}${REDACTED}`;
+      i = wordEnd;
+      continue;
+    }
+
+    // Spaced value: `--password value`, `-b cookie`, curl `-u user:pass`
+    let j = wordEnd;
     if (j < s.length && /\s/.test(s[j]!)) {
       const valueStart = j + (s.slice(j).match(/^\s*/)?.[0].length ?? 0);
       if (valueStart < s.length) {
@@ -601,9 +762,8 @@ function redactSecretFlags(command: string): string {
       }
     }
 
-    // Flag with no value — leave as-is
-    result += flag;
-    i = j;
+    result += wordRaw;
+    i = wordEnd;
   }
 
   return result;
@@ -636,9 +796,12 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
   result = redactAuthHeaders(result);
   result = redactSecretFlags(result);
 
-  // Compact -pPASSWORD (including numeric passwords like -p123456).
-  // Spaced forms such as `ps -p 123` are handled above / left as process selectors.
-  result = result.replace(COMPACT_PASSWORD_FLAG, () => ` -p${REDACTED}`);
+  // Compact -pPASSWORD (including numeric passwords like -p123456) only on
+  // credential-oriented commands so `find -print` / `sort -u` stay intact.
+  // Spaced forms such as `ps -p 123` are left as process selectors.
+  if (CREDENTIAL_SHORT_FLAG_COMMANDS.test(result)) {
+    result = result.replace(COMPACT_PASSWORD_FLAG, () => ` -p${REDACTED}`);
+  }
 
   result = redactJsonSecrets(result);
 

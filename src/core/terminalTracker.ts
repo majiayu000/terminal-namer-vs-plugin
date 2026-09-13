@@ -87,6 +87,22 @@ export class TerminalTracker {
         if (e.affectsConfiguration('terminalAiNamer.commandThreshold')) {
           this.commandThreshold = this.getCommandThreshold();
         }
+        // Clear permanent failure latch when provider/credentials/consent change so
+        // auto-rename can recover after transient outages or config fixes.
+        if (
+          e.affectsConfiguration('terminalAiNamer.provider') ||
+          e.affectsConfiguration('terminalAiNamer.openrouterApiKey') ||
+          e.affectsConfiguration('terminalAiNamer.openaiApiKey') ||
+          e.affectsConfiguration('terminalAiNamer.claudeApiKey') ||
+          e.affectsConfiguration('terminalAiNamer.ollamaEndpoint') ||
+          e.affectsConfiguration('terminalAiNamer.ollamaModel') ||
+          e.affectsConfiguration('terminalAiNamer.allowSendCommandHistory') ||
+          e.affectsConfiguration('terminalAiNamer.autoRename')
+        ) {
+          for (const data of this.terminalDataMap.values()) {
+            data.renameFailed = false;
+          }
+        }
       })
     );
   }
