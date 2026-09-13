@@ -285,32 +285,105 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * One-shot renameWithArg under the rename mutex (does not re-acquire it).
+ * Returns true only when `terminal.name` matches `name` after dispatch.
+ */
+async function dispatchRenameWithArg(
+  terminal: vscode.Terminal,
+  name: string
+): Promise<boolean> {
+  if (terminal.name === name) {
+    return true;
+  }
+
+  const focused = await waitForTerminalFocus(terminal, RENAME_FOCUS_TIMEOUT_MS);
+  if (!focused || vscode.window.activeTerminal !== terminal) {
+    return false;
+  }
+
+  // Final pre-dispatch check — still best-effort under API limits.
+  if (vscode.window.activeTerminal !== terminal) {
+    return false;
+  }
+
+  await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
+    name
+  });
+  return terminal.name === name;
+}
+
+/**
  * Restore a terminal title after a mid-dispatch focus steal renamed the wrong
  * instance. Must run under the rename mutex (does not re-acquire it).
+ *
+ * If focus drifts during this restore and a third terminal receives
+ * `previousName`, undo that tertiary rename before returning failure so we
+ * do not leave additional wrong titles behind.
  */
 async function restoreTerminalName(
   terminal: vscode.Terminal,
   previousName: string
 ): Promise<boolean> {
+  if (terminal.name === previousName) {
+    return true;
+  }
+
   const focused = await waitForTerminalFocus(terminal, RENAME_FOCUS_TIMEOUT_MS);
   if (!focused || vscode.window.activeTerminal !== terminal) {
     return false;
   }
+
+  const nameByTerminal = new Map<vscode.Terminal, string>();
+  for (const t of vscode.window.terminals) {
+    nameByTerminal.set(t, t.name);
+  }
+
+  if (vscode.window.activeTerminal !== terminal) {
+    return false;
+  }
+
   await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
     name: previousName
   });
-  return terminal.name === previousName;
+
+  if (terminal.name === previousName) {
+    return true;
+  }
+
+  // Mid-restore focus steal: recover any tertiary terminal that now bears
+  // previousName (one-shot, no nested retry) before reporting failure.
+  for (const candidate of vscode.window.terminals) {
+    if (candidate === terminal) {
+      continue;
+    }
+    const prior = nameByTerminal.get(candidate);
+    if (prior === undefined || prior === previousName) {
+      continue;
+    }
+    if (candidate.name !== previousName) {
+      continue;
+    }
+    const undone = await dispatchRenameWithArg(candidate, prior);
+    if (!undone) {
+      return false;
+    }
+  }
+
+  // Primary restore still failed; caller must not retry the original rename.
+  return false;
 }
 
 /**
  * If renameWithArg hit a different terminal because focus drifted across the
  * async dispatch boundary, put that collateral title back before retrying.
+ * Returns false if any collateral restore fails — caller must abort rather
+ * than retry and report success while wrong titles remain.
  */
 async function restoreCollateralRenames(
   target: vscode.Terminal,
   intendedName: string,
   nameByTerminal: Map<vscode.Terminal, string>
-): Promise<void> {
+): Promise<boolean> {
   for (const candidate of vscode.window.terminals) {
     if (candidate === target) {
       continue;
@@ -320,9 +393,13 @@ async function restoreCollateralRenames(
       continue;
     }
     if (candidate.name === intendedName) {
-      await restoreTerminalName(candidate, previousName);
+      const restored = await restoreTerminalName(candidate, previousName);
+      if (!restored || candidate.name !== previousName) {
+        return false;
+      }
     }
   }
+  return true;
 }
 
 /**
@@ -376,12 +453,18 @@ async function renameTerminalSafely(
       });
 
       // Confirm this instance received the title. If another terminal stole
-      // focus mid-dispatch, restore that collateral rename and retry.
+      // focus mid-dispatch, restore that collateral rename and retry only
+      // when restoration fully succeeded.
       if (terminal.name === name) {
         return true;
       }
 
-      await restoreCollateralRenames(terminal, name, nameByTerminal);
+      const restored = await restoreCollateralRenames(terminal, name, nameByTerminal);
+      if (!restored) {
+        // Do not retry: a later successful rename of the target would hide
+        // unrecovered collateral titles and report false success.
+        return false;
+      }
     }
     return false;
   });
