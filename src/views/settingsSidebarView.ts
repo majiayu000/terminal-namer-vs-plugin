@@ -155,6 +155,19 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         // Explicit clear goes through the clearApiKey message instead.
         if (typeof value === 'string' && value.length > 0) {
           await setApiKey(this._context, secretProvider, value);
+          // Sidebar save must override retained legacy plaintext; otherwise
+          // getApiKey would keep preferring a conflicting settings.json value.
+          try {
+            await clearLegacyApiKeySettings(secretProvider);
+          } catch (error) {
+            console.error(
+              'Failed to clear some legacy API key settings after sidebar save:',
+              error
+            );
+            vscode.window.showWarningMessage(
+              'API Key saved to SecretStorage, but some plaintext settings could not be removed (they may be read-only). The saved SecretStorage key will be used for requests.'
+            );
+          }
         }
         continue;
       }

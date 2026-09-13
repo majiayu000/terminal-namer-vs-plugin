@@ -19,6 +19,12 @@ const LEGACY_CONFIG_KEYS: Record<ApiKeyProvider, string> = {
 /** globalState marker so an explicit Clear cannot remigrate retained plaintext. */
 const CLEARED_API_KEYS_STATE = 'terminalAiNamer.clearedApiKeys';
 
+/**
+ * Providers whose SecretStorage value was explicitly set via the sidebar and
+ * must win over any retained conflicting legacy plaintext until cleared.
+ */
+const SECRET_OVERRIDES_LEGACY_STATE = 'terminalAiNamer.secretOverridesLegacy';
+
 /** Full configuration ids for leftover plaintext API keys (migration listeners). */
 export const LEGACY_API_KEY_CONFIGURATION_IDS = (
   Object.values(LEGACY_CONFIG_KEYS) as string[]
@@ -84,6 +90,45 @@ function isApiKeyCleared(
   return Boolean(readClearedProviders(context)[provider]);
 }
 
+function readSecretOverrideProviders(
+  context: vscode.ExtensionContext
+): Partial<Record<ApiKeyProvider, true>> {
+  return context.globalState.get<Partial<Record<ApiKeyProvider, true>>>(
+    SECRET_OVERRIDES_LEGACY_STATE,
+    {}
+  );
+}
+
+async function markSecretOverridesLegacy(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider
+): Promise<void> {
+  const overrides = {
+    ...readSecretOverrideProviders(context),
+    [provider]: true as const,
+  };
+  await context.globalState.update(SECRET_OVERRIDES_LEGACY_STATE, overrides);
+}
+
+async function clearSecretOverridesLegacy(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider
+): Promise<void> {
+  const overrides = { ...readSecretOverrideProviders(context) };
+  if (!overrides[provider]) {
+    return;
+  }
+  delete overrides[provider];
+  await context.globalState.update(SECRET_OVERRIDES_LEGACY_STATE, overrides);
+}
+
+function secretOverridesLegacy(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider
+): boolean {
+  return Boolean(readSecretOverrideProviders(context)[provider]);
+}
+
 /**
  * Resolve the effective legacy plaintext value using VS Code precedence.
  * An explicit empty string at a higher-priority scope remains authoritative
@@ -106,6 +151,10 @@ function effectiveLegacyFromInspect(inspected: InspectedString | undefined): Eff
 /**
  * Effective legacy key for the current workspace / folder resource.
  * Used so retained conflicting plaintext remains usable until migrated.
+ *
+ * Only `inspect()` scoped fields count. Do not fall back to `config.get()`:
+ * that returns the contributed package.json default `""`, which would look like
+ * an explicit empty override and hide SecretStorage keys on normal installs.
  */
 function effectiveLegacyForResource(
   provider: ApiKeyProvider,
@@ -114,16 +163,7 @@ function effectiveLegacyForResource(
   const config = vscode.workspace.getConfiguration('terminalAiNamer', resource);
   const configKey = LEGACY_CONFIG_KEYS[provider];
   const inspected = config.inspect<string>(configKey);
-  const fromInspect = effectiveLegacyFromInspect(inspected);
-  if (fromInspect.kind !== 'absent') {
-    return fromInspect;
-  }
-  // Fallback for values that inspect may not surface (rare / language overrides).
-  const fallback = config.get<string>(configKey);
-  if (typeof fallback === 'string') {
-    return fallback.length > 0 ? { kind: 'value', value: fallback } : { kind: 'empty' };
-  }
-  return { kind: 'absent' };
+  return effectiveLegacyFromInspect(inspected);
 }
 
 function currentWorkspaceResource(): vscode.Uri | undefined {
@@ -147,6 +187,12 @@ export async function getApiKey(
 
   const secret = await context.secrets.get(SECRET_KEYS[provider]);
 
+  // An explicit sidebar save takes precedence over retained conflicting plaintext
+  // (e.g. when some scopes were read-only and could not be cleared yet).
+  if (secretOverridesLegacy(context, provider)) {
+    return secret || undefined;
+  }
+
   // Retained conflicting workspace plaintext must remain effective for this workspace.
   if (legacy.kind === 'value') {
     if (!secret || secret !== legacy.value) {
@@ -163,6 +209,7 @@ export async function setApiKey(
   apiKey: string
 ): Promise<void> {
   await clearApiKeyClearedMarker(context, provider);
+  await markSecretOverridesLegacy(context, provider);
   await context.secrets.store(SECRET_KEYS[provider], apiKey);
 }
 
@@ -171,6 +218,7 @@ export async function deleteApiKey(
   provider: ApiKeyProvider
 ): Promise<void> {
   await markApiKeyCleared(context, provider);
+  await clearSecretOverridesLegacy(context, provider);
   await context.secrets.delete(SECRET_KEYS[provider]);
 }
 
@@ -274,6 +322,68 @@ async function clearCompatibleLegacyScopes(
   }
 }
 
+/**
+ * After promoting the effective legacy value into SecretStorage, clear that
+ * scope and every lower-precedence scope. Leaving a shadowed global/user key
+ * would make it the new effective value and override the migrated secret.
+ */
+async function clearEffectiveAndLowerLegacyScopes(
+  config: vscode.WorkspaceConfiguration,
+  configKey: string,
+  inspected: InspectedString
+): Promise<void> {
+  const scopeOrder: Array<{
+    target: vscode.ConfigurationTarget;
+    value: string | undefined;
+  }> = [
+    {
+      target: vscode.ConfigurationTarget.WorkspaceFolder,
+      value: inspected.workspaceFolderValue,
+    },
+    {
+      target: vscode.ConfigurationTarget.Workspace,
+      value: inspected.workspaceValue,
+    },
+    {
+      target: vscode.ConfigurationTarget.Global,
+      value: inspected.globalValue,
+    },
+  ];
+
+  let clearing = false;
+  for (const { target, value } of scopeOrder) {
+    if (!clearing) {
+      if (typeof value === 'string') {
+        // Start clearing at the effective (highest-priority) explicit scope.
+        clearing = true;
+      } else {
+        continue;
+      }
+    }
+    if (typeof value === 'string' && value.length > 0) {
+      await config.update(configKey, undefined, target);
+    } else if (typeof value === 'string' && value.length === 0) {
+      // Explicit empty at/below effective scope: remove the override entry too.
+      await config.update(configKey, undefined, target);
+    }
+  }
+}
+
+/**
+ * Best-effort plaintext cleanup that never throws (used while a Clear tombstone
+ * is active so remigration stays suppressed but leftovers can still be retried).
+ */
+async function tryClearLegacyApiKeySettings(provider: ApiKeyProvider): Promise<void> {
+  try {
+    await clearLegacyApiKeySettings(provider);
+  } catch (error) {
+    console.error(
+      `Retry cleanup of legacy API key settings failed for ${provider}:`,
+      error
+    );
+  }
+}
+
 async function migrateProviderForConfig(
   context: vscode.ExtensionContext,
   provider: ApiKeyProvider,
@@ -281,11 +391,14 @@ async function migrateProviderForConfig(
 ): Promise<void> {
   if (isApiKeyCleared(context, provider)) {
     // User explicitly cleared this provider; never remigrate retained plaintext.
-    // Still attempt compatible cleanup of matching leftover values when possible.
+    // Keep suppressing remigration, but retry best-effort plaintext removal so
+    // credentials do not linger forever after a previously read-only settings file
+    // becomes writable again.
     const existing = await context.secrets.get(SECRET_KEYS[provider]);
     if (existing) {
       await context.secrets.delete(SECRET_KEYS[provider]);
     }
+    await tryClearLegacyApiKeySettings(provider);
     return;
   }
 
@@ -302,7 +415,11 @@ async function migrateProviderForConfig(
   const existing = await context.secrets.get(SECRET_KEYS[provider]);
   if (!existing) {
     await context.secrets.store(SECRET_KEYS[provider], legacyValue);
-    await clearCompatibleLegacyScopes(config, configKey, legacyValue);
+    // Clear the migrated effective scope and shadowed lower scopes so they
+    // cannot resurface and replace the secret on the next getApiKey call.
+    if (inspected) {
+      await clearEffectiveAndLowerLegacyScopes(config, configKey, inspected);
+    }
     return;
   }
 
