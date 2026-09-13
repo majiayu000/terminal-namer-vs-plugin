@@ -60,6 +60,17 @@ console.log('commandSanitizer');
   );
   assertIncludes(out, '[REDACTED]', 'redacts Authorization header');
   assertNotIncludes(out, 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', 'removes bearer token');
+
+  const tokenScheme = sanitizeCommand(
+    "curl -H 'Authorization: token hunter2' https://api.example.com"
+  );
+  assertIncludes(tokenScheme, '[REDACTED]', 'redacts unrecognized Authorization scheme');
+  assertNotIncludes(tokenScheme, 'hunter2', 'removes multi-word Authorization value');
+  assertNotIncludes(tokenScheme, 'token hunter2', 'does not leave scheme+secret after redaction');
+
+  const apiKeyWs = sanitizeCommand("curl -H 'X-Api-Key: correct horse' https://api.example.com");
+  assertIncludes(apiKeyWs, '[REDACTED]', 'redacts X-Api-Key with whitespace');
+  assertNotIncludes(apiKeyWs, 'horse', 'removes X-Api-Key passphrase tail');
 }
 
 {
@@ -71,6 +82,12 @@ console.log('commandSanitizer');
   const numeric = sanitizeCommand('mysql -uroot -p123456 mydb');
   assertIncludes(numeric, '[REDACTED]', 'redacts numeric compact -pPASSWORD');
   assertNotIncludes(numeric, '123456', 'removes numeric mysql password');
+
+  const gluedQuoted = sanitizeCommand('mysql -uroot -p"correct horse" mydb');
+  assertIncludes(gluedQuoted, '[REDACTED]', 'redacts glued quoted compact -p password');
+  assertNotIncludes(gluedQuoted, 'correct', 'removes glued quoted password head');
+  assertNotIncludes(gluedQuoted, 'horse', 'removes glued quoted password tail');
+  assertIncludes(gluedQuoted, 'mydb', 'keeps trailing args after glued quoted -p');
 
   const flagged = sanitizeCommand('mycli --password=hunter2 query');
   assertIncludes(flagged, '[REDACTED]', 'redacts --password=');
@@ -220,6 +237,14 @@ console.log('commandSanitizer');
   const out = sanitizeCommand(long, { maxCommandLength: 40 });
   assert(out.length <= 41, `caps length (got ${out.length})`);
   assert(out.endsWith('…'), 'adds ellipsis when truncated');
+
+  // Multi-megabyte paste must not scan the full input (bounded early).
+  const huge = 'echo ' + '!'.repeat(5 * 1024 * 1024);
+  const t0 = Date.now();
+  const hugeOut = sanitizeCommand(huge, { maxCommandLength: 120 });
+  const elapsed = Date.now() - t0;
+  assert(hugeOut.length <= 121, `caps huge input length (got ${hugeOut.length})`);
+  assert(elapsed < 2000, `huge input sanitizes quickly (took ${elapsed}ms)`);
 }
 
 {
@@ -263,6 +288,28 @@ console.log('commandSanitizer');
   assert(
     sanitizeCommand('TOKEN=correct" horse battery" npm test', { argv0Only: true }) === 'npm',
     'argv0Only does not leak compound quoted assignment fragments'
+  );
+  assert(
+    extractArgv0("$(printf 'Customer Secret') --token hunter2") === '[cmd]',
+    'extractArgv0 replaces command-substitution executable with placeholder'
+  );
+  assert(
+    sanitizeCommand("$(printf 'Customer Secret') --token hunter2", { argv0Only: true }) ===
+      '[cmd]',
+    'argv0Only does not leak command-substitution contents'
+  );
+  assert(
+    extractArgv0('$env:API_KEY="hunter2"; npm test') === 'npm',
+    'extractArgv0 skips PowerShell $env: assignment'
+  );
+  assert(
+    sanitizeCommand('$env:API_KEY="hunter2"; npm test', { argv0Only: true }) === 'npm',
+    'argv0Only does not leak PowerShell $env: secret'
+  );
+  assertNotIncludes(
+    sanitizeCommand('$env:API_KEY="hunter2"; npm test'),
+    'hunter2',
+    'sanitized mode redacts PowerShell $env: secret'
   );
 }
 

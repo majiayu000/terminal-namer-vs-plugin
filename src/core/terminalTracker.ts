@@ -1,8 +1,13 @@
 import * as vscode from 'vscode';
 
+/** Outcome of an auto-rename attempt. */
+export type RenameAttemptResult = 'renamed' | 'pending' | 'failed';
+
 interface TerminalData {
   commands: string[];
   named: boolean;
+  /** True after a provider/rename failure; suppresses retry spam until reset. */
+  renameFailed: boolean;
 }
 
 /**
@@ -14,7 +19,7 @@ export class TerminalTracker {
   private onCommandThresholdReached: (
     terminal: vscode.Terminal,
     commands: string[]
-  ) => void | Promise<void | boolean>;
+  ) => void | Promise<void | boolean | RenameAttemptResult>;
   private commandThreshold: number;
   private renameInFlight = new Set<vscode.Terminal>();
 
@@ -22,7 +27,7 @@ export class TerminalTracker {
     onCommandThresholdReached: (
       terminal: vscode.Terminal,
       commands: string[]
-    ) => void | Promise<void | boolean>
+    ) => void | Promise<void | boolean | RenameAttemptResult>
   ) {
     this.onCommandThresholdReached = onCommandThresholdReached;
     this.commandThreshold = this.getCommandThreshold();
@@ -35,11 +40,15 @@ export class TerminalTracker {
     return config.get<number>('commandThreshold', 3);
   }
 
+  private emptyData(): TerminalData {
+    return { commands: [], named: false, renameFailed: false };
+  }
+
   private init() {
     // 监听终端创建
     this.disposables.push(
       vscode.window.onDidOpenTerminal((terminal) => {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, this.emptyData());
       })
     );
 
@@ -68,7 +77,7 @@ export class TerminalTracker {
     // 初始化已存在的终端
     vscode.window.terminals.forEach((terminal) => {
       if (!this.terminalDataMap.has(terminal)) {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, this.emptyData());
       }
     });
 
@@ -98,7 +107,7 @@ export class TerminalTracker {
 
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = this.emptyData();
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -117,19 +126,24 @@ export class TerminalTracker {
     if (
       autoRename &&
       !data.named &&
+      !data.renameFailed &&
       !this.renameInFlight.has(terminal) &&
       data.commands.length >= this.commandThreshold
     ) {
-      // Only mark named after a successful rename. Consent refusal / failure
-      // must leave the terminal pending so enabling consent can still auto-rename.
+      // Only mark named after a successful rename. Consent refusal leaves the
+      // terminal pending; provider failures set renameFailed to avoid spam.
       this.renameInFlight.add(terminal);
       void Promise.resolve(
         this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold))
       )
-        .then((renamed) => {
-          if (renamed === true) {
+        .then((result) => {
+          if (result === true || result === 'renamed') {
             data.named = true;
+            data.renameFailed = false;
+          } else if (result === 'failed') {
+            data.renameFailed = true;
           }
+          // false / 'pending' / void → leave pending for consent later
         })
         .finally(() => {
           this.renameInFlight.delete(terminal);
@@ -143,7 +157,7 @@ export class TerminalTracker {
   addCommand(terminal: vscode.Terminal, command: string) {
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = this.emptyData();
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -168,6 +182,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = false;
+      data.renameFailed = false;
     }
   }
 
@@ -178,6 +193,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = true;
+      data.renameFailed = false;
     }
   }
 

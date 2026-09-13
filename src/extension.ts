@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { TerminalTracker, UsageTracker } from './core';
+import { TerminalTracker, UsageTracker, RenameAttemptResult } from './core';
 import { createProvider } from './providers';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
@@ -23,9 +23,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      const renamed = await renameTerminalWithAI(terminal, commands, { interactive: false });
+      const result = await renameTerminalWithAI(terminal, commands, { interactive: false });
       terminalTreeProvider?.refresh();
-      return renamed;
+      return result;
     });
 
     // 初始化侧边栏 - 终端列表
@@ -170,9 +170,12 @@ export function activate(context: vscode.ExtensionContext) {
           const commands = tracker?.getCommands(terminal) || [];
           if (commands.length > 0) {
             attempted++;
-            const renamed = await renameTerminalWithAI(terminal, commands);
-            if (renamed) {
+            const result = await renameTerminalWithAI(terminal, commands);
+            if (result === 'renamed') {
               renamedCount++;
+            } else if (result === 'pending') {
+              // User cancelled consent — stop prompting for remaining terminals.
+              break;
             }
           }
         }
@@ -329,13 +332,14 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
 
 /**
  * 使用 AI 重命名终端.
- * @returns true when the terminal was renamed successfully.
+ * @returns 'renamed' on success, 'pending' when consent is absent (retry later),
+ *          'failed' on provider/rename errors (do not auto-retry).
  */
 async function renameTerminalWithAI(
   terminal: vscode.Terminal,
   commands: string[],
   options: { interactive?: boolean } = {}
-): Promise<boolean> {
+): Promise<RenameAttemptResult> {
   try {
     const interactive = options.interactive !== false;
     const consented = await ensureCommandHistoryConsent(interactive);
@@ -343,7 +347,7 @@ async function renameTerminalWithAI(
       if (interactive) {
         vscode.window.showInformationMessage('已取消：未同意发送命令历史，不会调用 AI 命名。');
       }
-      return false;
+      return 'pending';
     }
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
@@ -390,11 +394,11 @@ async function renameTerminalWithAI(
         vscode.window.showInformationMessage(`终端已命名为: ${result.name}`);
       }
     );
-    return renamed;
+    return renamed ? 'renamed' : 'failed';
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
-    return false;
+    return 'failed';
   }
 }
 

@@ -23,9 +23,8 @@ function canStartAssignment(s: string, i: number): boolean {
   return !/[A-Za-z0-9_]/.test(s[i - 1]!);
 }
 
-/** Authorization / Bearer / Basic headers */
-const AUTH_HEADER =
-  /(?:Authorization|X-Api-Key|X-Auth-Token)\s*[:=]\s*(?:Bearer\s+|Basic\s+)?['"]?[^\s'"]+/gi;
+/** Authorization / Bearer / Basic / X-Api-Key style header names */
+const AUTH_HEADER_NAME = /(?:Authorization|X-Api-Key|X-Auth-Token)/gi;
 
 /** Common password / token / user CLI flags with their values */
 const SECRET_FLAG_NAMES =
@@ -324,6 +323,15 @@ function redactEnvAssignments(command: string): string {
   while (i < s.length) {
     if (canStartAssignment(s, i)) {
       const rest = s.slice(i);
+      // PowerShell: $env:API_KEY=hunter2
+      const ps = rest.match(/^(\$env:)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)/i);
+      if (ps && SECRET_ENV_NAME.test(ps[2]!)) {
+        const valueStart = i + ps[0].length;
+        const valueEnd = skipShellWord(s, valueStart);
+        result += `${ps[1]}${ps[2]}=${REDACTED}`;
+        i = valueEnd;
+        continue;
+      }
       const m = rest.match(/^(export\s+)?([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)/);
       if (m && SECRET_ENV_NAME.test(m[2]!)) {
         const valueStart = i + m[0].length;
@@ -342,6 +350,7 @@ function redactEnvAssignments(command: string): string {
 
 /**
  * Skip leading shell VAR=value assignments, including quoted values and substitutions.
+ * Also skips PowerShell `$env:NAME=value` (with optional trailing `;`).
  */
 function skipLeadingAssignments(command: string): string {
   let i = 0;
@@ -351,6 +360,19 @@ function skipLeadingAssignments(command: string): string {
       i++;
     }
     const rest = s.slice(i);
+    // PowerShell: $env:API_KEY="hunter2"; npm test
+    const ps = rest.match(/^\$env:[A-Za-z_][A-Za-z0-9_]*\s*=\s*/i);
+    if (ps) {
+      i += ps[0].length;
+      i = skipShellWord(s, i);
+      while (i < s.length && /\s/.test(s[i]!)) {
+        i++;
+      }
+      if (s[i] === ';') {
+        i++;
+      }
+      continue;
+    }
     const m = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
     if (!m) {
       break;
@@ -379,10 +401,86 @@ export function extractArgv0(command: string): string {
 
   const firstEnd = skipShellWord(withoutEnv, 0);
   const firstRaw = withoutEnv.slice(0, firstEnd);
+  // Command substitutions used as argv0 must not leak their source text/args.
+  if (/^\$\(/.test(firstRaw) || /^`/.test(firstRaw)) {
+    return '[cmd]';
+  }
   const first = unquoteShellWord(firstRaw);
   // Drop path: /usr/bin/npm → npm, .\foo.cmd → foo.cmd
   const base = first.replace(/^.*[/\\]/, '');
   return base || first;
+}
+
+/**
+ * Redact Authorization / X-Api-Key / X-Auth-Token header values, including
+ * multi-word and unrecognized schemes inside quoted `-H` arguments
+ * (e.g. `Authorization: token hunter2`).
+ */
+function redactAuthHeaders(command: string): string {
+  let result = '';
+  let last = 0;
+  AUTH_HEADER_NAME.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = AUTH_HEADER_NAME.exec(command)) !== null) {
+    let j = m.index + m[0].length;
+    while (j < command.length && /\s/.test(command[j]!)) {
+      j++;
+    }
+    if (j >= command.length || (command[j] !== ':' && command[j] !== '=')) {
+      continue;
+    }
+    j++; // consume : or =
+    while (j < command.length && /\s/.test(command[j]!)) {
+      j++;
+    }
+    const scheme = command.slice(j).match(/^(Bearer|Basic)\s+/i);
+    if (scheme) {
+      j += scheme[0].length;
+    }
+
+    // Prefer enclosing quote from `-H 'Authorization: …'` / `-H "…"`.
+    let enclosing: string | undefined;
+    for (let k = m.index - 1; k >= 0; k--) {
+      const c = command[k]!;
+      if (c === "'" || c === '"') {
+        enclosing = c;
+        break;
+      }
+      if (!/\s/.test(c)) {
+        break;
+      }
+    }
+
+    if (enclosing) {
+      while (j < command.length && command[j] !== enclosing) {
+        j++;
+      }
+    } else if (command[j] === "'" || command[j] === '"') {
+      j = skipShellWord(command, j);
+    } else {
+      // Unquoted multi-word value: stop before next flag or URL.
+      while (j < command.length) {
+        if (command[j] === "'" || command[j] === '"') {
+          break;
+        }
+        if (/\s/.test(command[j]!)) {
+          const ws = command.slice(j).match(/^\s+/)?.[0].length ?? 0;
+          const next = command.slice(j + ws);
+          if (!next || /^-/.test(next) || /^https?:\/\//i.test(next)) {
+            break;
+          }
+        }
+        j++;
+      }
+    }
+
+    result += command.slice(last, m.index);
+    result += `${m[0]}: ${REDACTED}`;
+    last = j;
+    AUTH_HEADER_NAME.lastIndex = j;
+  }
+  result += command.slice(last);
+  return result;
 }
 
 function redactHighEntropy(command: string): string {
@@ -455,8 +553,8 @@ function redactSecretFlags(command: string): string {
     let j = i + flag.length;
 
     // Single-letter flags like `-pPASSWORD` / `-uadmin:hunter2` are compact forms.
-    // `-p` glued passwords are handled by COMPACT_PASSWORD_FLAG below.
     // Glued `-uuser:password` (curl) is redacted here; plain `-uroot` (mysql user) is left.
+    // Glued `-p"correct horse"` must consume a full shell word so the passphrase cannot leak.
     const isSingleLetter = /^-[pu]$/i.test(flag);
     if (isSingleLetter && j < s.length && !/[\s=]/.test(s[j]!)) {
       if (/^-u$/i.test(flag)) {
@@ -470,6 +568,12 @@ function redactSecretFlags(command: string): string {
           i = j;
           continue;
         }
+      }
+      if (/^-p$/i.test(flag)) {
+        const valueEnd = skipShellWord(s, j);
+        result += `${flag}${REDACTED}`;
+        i = valueEnd;
+        continue;
       }
       while (i < s.length && !/\s/.test(s[i]!)) {
         result += s[i];
@@ -521,16 +625,15 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
     return '';
   }
 
+  // Bound input early so multi-megabyte pastes cannot stall the extension host.
+  // Keep a small margin over maxLen so near-limit secrets can still be redacted.
+  const inputBudget = Math.max(maxLen * 8, 512);
+  if (result.length > inputBudget) {
+    result = result.slice(0, inputBudget);
+  }
+
   result = redactEnvAssignments(result);
-
-  result = result.replace(AUTH_HEADER, (m) => {
-    const sep = m.search(/[:=]/);
-    if (sep === -1) {
-      return REDACTED;
-    }
-    return `${m.slice(0, sep + 1)} ${REDACTED}`;
-  });
-
+  result = redactAuthHeaders(result);
   result = redactSecretFlags(result);
 
   // Compact -pPASSWORD (including numeric passwords like -p123456).
