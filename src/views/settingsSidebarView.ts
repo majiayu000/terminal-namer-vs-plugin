@@ -138,6 +138,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     const settings = message.settings;
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
       vscode.window.showErrorMessage('设置保存失败: 无效的设置载荷');
+      this._postSaveResult(false, '无效的设置载荷');
       return;
     }
 
@@ -188,12 +189,21 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
       if (!isApiKeyProvider(provider)) {
         vscode.window.showWarningMessage('当前提供商不使用 API Key');
-      } else if (message.apiKey.length === 0) {
-        await clearApiKey(this._secrets, provider);
-        apiKeySaved = true;
       } else {
-        await setApiKey(this._secrets, provider, message.apiKey);
-        apiKeySaved = true;
+        try {
+          if (message.apiKey.length === 0) {
+            await clearApiKey(this._secrets, provider);
+          } else {
+            await setApiKey(this._secrets, provider, message.apiKey);
+          }
+          apiKeySaved = true;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          vscode.window.showErrorMessage(`API Key 未能写入 SecretStorage: ${detail}`);
+          // Keep the webview draft; do not refresh settings (that would clear input).
+          this._postSaveResult(false, detail);
+          return;
+        }
       }
     }
 
@@ -205,6 +215,18 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       vscode.window.showInformationMessage('设置已保存');
     }
     await this._sendCurrentSettings();
+    this._postSaveResult(true);
+  }
+
+  private _postSaveResult(ok: boolean, error?: string) {
+    if (!this._view) {
+      return;
+    }
+    this._view.webview.postMessage({
+      command: 'saveSettingsResult',
+      ok,
+      error: error ?? null
+    });
   }
 
   private async _sendCurrentSettings() {
@@ -464,6 +486,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     const vscode = acquireVsCodeApi();
     let apiKeyConfigured = false;
     let clearRequested = false;
+    let saveInFlight = false;
+    /** Typed key kept until host SecretStorage ack so a failed store can restore. */
+    let pendingApiKeyDraft = '';
 
     function syncProviderUi() {
       const provider = document.getElementById('provider').value;
@@ -477,6 +502,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       syncProviderUi();
       // Pending clear/replace must not apply to a different provider.
       clearRequested = false;
+      pendingApiKeyDraft = '';
       document.getElementById('apiKey').value = '';
       apiKeyConfigured = false;
       updateApiKeyUi();
@@ -535,6 +561,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function saveSettings() {
+      if (saveInFlight) {
+        return;
+      }
       const provider = document.getElementById('provider').value;
       const settings = {
         provider: provider,
@@ -552,13 +581,17 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       // A typed replacement wins over a prior Clear click.
       if (typedKey) {
         payload.apiKey = typedKey;
+        pendingApiKeyDraft = typedKey;
       } else if (clearRequested) {
         payload.apiKey = '';
+        pendingApiKeyDraft = '';
+      } else {
+        pendingApiKeyDraft = '';
       }
 
+      saveInFlight = true;
+      // Do not clear the input until the host acknowledges SecretStorage success.
       vscode.postMessage(payload);
-      clearRequested = false;
-      document.getElementById('apiKey').value = '';
     }
 
     document.getElementById('provider').addEventListener('change', onProviderChange);
@@ -587,7 +620,23 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
     window.addEventListener('message', function (event) {
       const message = event.data;
-      if (message.command === 'loadSettings') {
+      if (message.command === 'saveSettingsResult') {
+        saveInFlight = false;
+        if (message.ok) {
+          clearRequested = false;
+          pendingApiKeyDraft = '';
+          document.getElementById('apiKey').value = '';
+          updateApiKeyUi();
+        } else if (pendingApiKeyDraft) {
+          // Restore typed replacement so the user can retry after SecretStorage failure.
+          document.getElementById('apiKey').value = pendingApiKeyDraft;
+          clearRequested = false;
+          updateApiKeyUi();
+        } else {
+          // Preserve pending clear intent when delete failed.
+          updateApiKeyUi();
+        }
+      } else if (message.command === 'loadSettings') {
         const s = message.settings;
         document.getElementById('provider').value = s.provider;
         document.getElementById('autoRename').checked = s.autoRename;
@@ -597,8 +646,11 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           document.getElementById('model').value = s.openrouterModel;
         }
         apiKeyConfigured = !!s.apiKeyConfigured;
-        clearRequested = false;
-        document.getElementById('apiKey').value = '';
+        // Only wipe the draft when not waiting on a failed/in-flight secret write.
+        if (!saveInFlight && !pendingApiKeyDraft) {
+          clearRequested = false;
+          document.getElementById('apiKey').value = '';
+        }
         updateApiKeyUi();
         if (s.provider !== 'ollama') {
           updateStatus(apiKeyConfigured);

@@ -43,6 +43,26 @@ function folderSecretKey(provider: ApiKeyProvider, folderUri: string): string {
   return `${SECRET_KEYS[provider]}.folder.${folderUri}`;
 }
 
+/**
+ * Pick the workspace-folder URI to consult for folder-scoped secrets.
+ * Prefer the folder that contains `resource`; when CWD is unknown, only a
+ * single-folder window is unambiguous enough to use.
+ */
+function resolveFolderUriForLookup(
+  resource?: vscode.Uri
+): vscode.Uri | undefined {
+  if (resource) {
+    return vscode.workspace.getWorkspaceFolder(resource)?.uri;
+  }
+
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders && folders.length === 1) {
+    return folders[0].uri;
+  }
+
+  return undefined;
+}
+
 /** Tracks plaintext that was migrated but not successfully cleared from settings. */
 function remnantKey(secretKey: string): string {
   return `${secretKey}.migratedRemnant`;
@@ -208,28 +228,29 @@ async function migrateScopeValue(
  * Cleared markers at a more-specific scope block fallthrough (explicit empty
  * overrides and sidebar clears).
  *
- * When no resource is provided (unknown terminal cwd / no Shell Integration),
- * folder-scoped credentials are skipped so we never silently pick an unrelated
- * folder account — fall through to workspace/global instead. Use hasApiKey to
- * detect whether any scope (including folder) is configured for the settings UI.
+ * When no resource is provided (unknown terminal cwd / no Shell Integration):
+ * - single-folder windows still resolve that sole folder scope (unambiguous)
+ * - multi-root windows skip folder scopes so we never pick an unrelated folder
+ *   account — fall through to workspace/global instead
+ *
+ * Use hasApiKey to detect whether any scope (including folder) is configured
+ * for the settings UI.
  */
 export async function getApiKey(
   secrets: vscode.SecretStorage,
   provider: ApiKeyProvider,
   resource?: vscode.Uri
 ): Promise<string | undefined> {
-  if (resource) {
-    const matchingFolder = vscode.workspace.getWorkspaceFolder(resource);
-    if (matchingFolder) {
-      const folderValue = await secrets.get(
-        folderSecretKey(provider, matchingFolder.uri.toString())
-      );
-      if (isClearedMarker(folderValue)) {
-        return undefined;
-      }
-      if (isUsableSecret(folderValue)) {
-        return folderValue;
-      }
+  const folderUri = resolveFolderUriForLookup(resource);
+  if (folderUri) {
+    const folderValue = await secrets.get(
+      folderSecretKey(provider, folderUri.toString())
+    );
+    if (isClearedMarker(folderValue)) {
+      return undefined;
+    }
+    if (isUsableSecret(folderValue)) {
+      return folderValue;
     }
   }
 
@@ -436,17 +457,26 @@ export async function migrateApiKeysFromSettings(
       const primaryKey = workspaceSecretKey(provider, workspaceId);
 
       if (workspaceValue.length === 0) {
-        // Explicit empty scoped override: keep a tombstone so global does not leak.
-        await storeWorkspaceScopedSecret(
+        // Explicit empty scoped override: tombstone + remnant tracking so a
+        // failed plaintext cleanup cannot recreate the disable after setApiKey.
+        const failure = await migrateScopeValue(
           secrets,
-          provider,
-          CLEARED_MARKER,
-          true
-        );
-        const failure = await clearLegacyScope(
-          rootConfig,
-          legacyKey,
-          vscode.ConfigurationTarget.Workspace
+          primaryKey,
+          workspaceValue,
+          replaceExisting,
+          (replace) =>
+            storeWorkspaceScopedSecret(
+              secrets,
+              provider,
+              CLEARED_MARKER,
+              replace
+            ),
+          () =>
+            clearLegacyScope(
+              rootConfig,
+              legacyKey,
+              vscode.ConfigurationTarget.Workspace
+            )
         );
         if (failure) {
           cleanupFailures.push(failure);
@@ -491,11 +521,21 @@ export async function migrateApiKeysFromSettings(
       const folderKey = folderSecretKey(provider, folder.uri.toString());
 
       if (folderValue.length === 0) {
-        await storeMigratedSecret(secrets, folderKey, CLEARED_MARKER, true);
-        const failure = await clearLegacyScope(
-          folderConfig,
-          legacyKey,
-          vscode.ConfigurationTarget.WorkspaceFolder
+        // Same remnant tracking as non-empty migration: read-only settings must
+        // not rematerialize an empty override after the user saves a replacement.
+        const failure = await migrateScopeValue(
+          secrets,
+          folderKey,
+          folderValue,
+          replaceExisting,
+          (replace) =>
+            storeMigratedSecret(secrets, folderKey, CLEARED_MARKER, replace),
+          () =>
+            clearLegacyScope(
+              folderConfig,
+              legacyKey,
+              vscode.ConfigurationTarget.WorkspaceFolder
+            )
         );
         if (failure) {
           cleanupFailures.push(failure);
