@@ -5,23 +5,33 @@
  * 1. 名称必须包含目录名 - 方便区分不同路径的终端
  * 2. 格式：目录名-动作 或 目录名:动作
  * 3. 简洁有辨识度
+ * 4. 发送前统一脱敏，避免命令历史中的密钥泄露到第三方 AI
  */
+import { sanitizeCommands } from '../core/commandSanitizer';
+
 export interface PromptMessages {
   system: string;
   user: string;
 }
 
+export type CommandPrivacyMode = 'sanitized' | 'argv0';
+
 export interface PromptContext {
   commands: string[];
   cwd?: string;  // 当前目录名（只是最后一级，如 "blog"）
   language: 'zh' | 'en';
+  /** Privacy mode for command history (default: sanitized). */
+  privacyMode?: CommandPrivacyMode;
 }
 
 export function buildPrompt(context: PromptContext): PromptMessages {
-  const { commands, cwd, language } = context;
+  const { commands, cwd, language, privacyMode = 'sanitized' } = context;
 
-  // 去重并限制命令数量
-  const uniqueCommands = [...new Set(commands)].slice(0, 5);
+  // 脱敏 → 去重 → 限制命令数量（所有 provider 共用）
+  const safeCommands = sanitizeCommands(commands, {
+    argv0Only: privacyMode === 'argv0',
+  });
+  const uniqueCommands = [...new Set(safeCommands)].slice(0, 5);
   const commandStr = uniqueCommands.join(', ');
 
   const systemPrompt = language === 'zh'

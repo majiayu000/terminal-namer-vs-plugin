@@ -11,6 +11,8 @@ export interface GenerateResult {
   model: string;
 }
 
+import type { CommandPrivacyMode } from './prompt';
+
 /**
  * 生成名称的上下文
  */
@@ -18,6 +20,8 @@ export interface GenerateContext {
   commands: string[];
   language: 'zh' | 'en';
   cwd?: string;  // 当前目录名（只是最后一级）
+  /** How command history is prepared before the AI prompt (default: sanitized). */
+  privacyMode?: CommandPrivacyMode;
 }
 
 /**

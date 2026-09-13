@@ -11,8 +11,8 @@ export class OpenAIProvider implements AIProvider {
   }
 
   async generateName(context: GenerateContext): Promise<GenerateResult> {
-    const { commands, language, cwd } = context;
-    const prompt = buildPrompt({ commands, language, cwd });
+    const { commands, language, cwd, privacyMode } = context;
+    const prompt = buildPrompt({ commands, language, cwd, privacyMode });
 
     const response = await fetch(this.baseURL || 'https://api.openai.com/v1/chat/completions', {
       method: 'POST',

@@ -220,6 +220,24 @@
             "English"
           ],
           "description": "命名语言"
+        },
+        "terminalAiNamer.allowSendCommandHistory": {
+          "type": "boolean",
+          "default": false,
+          "description": "同意将（已脱敏的）终端命令历史发送到所选 AI 提供商以生成终端名称。未开启时不会上传命令历史。"
+        },
+        "terminalAiNamer.commandPrivacyMode": {
+          "type": "string",
+          "default": "sanitized",
+          "enum": [
+            "sanitized",
+            "argv0"
+          ],
+          "enumDescriptions": [
+            "脱敏后发送命令行（默认）：遮蔽密钥、Authorization、密码参数等",
+            "仅发送命令名（argv0）：不发送参数，隐私最强"
+          ],
+          "description": "发送给 AI 的命令历史隐私模式"
         }
       }
     }
@@ -229,7 +247,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:sanitizer": "node scripts/test-command-sanitizer.js"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

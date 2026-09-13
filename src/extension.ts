@@ -17,7 +17,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      await renameTerminalWithAI(terminal, commands);
+      await renameTerminalWithAI(terminal, commands, { interactive: false });
       terminalTreeProvider?.refresh();
     });
 
@@ -218,12 +218,61 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * Ensure the user has explicitly consented to sending command history to AI.
+ * Returns false if rename should abort.
+ */
+async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolean> {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  if (config.get<boolean>('allowSendCommandHistory', false)) {
+    return true;
+  }
+
+  // Auto-rename must not spam consent dialogs — refuse until the setting is enabled.
+  if (!interactive) {
+    return false;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Terminal AI Namer 需要将（已脱敏的）命令历史发送到所选 AI 提供商才能生成名称。是否同意？未同意则不会上传命令历史。',
+    { modal: true },
+    '同意并继续',
+    '打开设置',
+    '取消'
+  );
+
+  if (choice === '同意并继续') {
+    await config.update('allowSendCommandHistory', true, vscode.ConfigurationTarget.Global);
+    return true;
+  }
+
+  if (choice === '打开设置') {
+    await vscode.commands.executeCommand('workbench.action.openSettings', 'terminalAiNamer.allowSendCommandHistory');
+  }
+
+  return false;
+}
+
+/**
  * 使用 AI 重命名终端
  */
-async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[]) {
+async function renameTerminalWithAI(
+  terminal: vscode.Terminal,
+  commands: string[],
+  options: { interactive?: boolean } = {}
+) {
   try {
+    const interactive = options.interactive !== false;
+    const consented = await ensureCommandHistoryConsent(interactive);
+    if (!consented) {
+      if (interactive) {
+        vscode.window.showInformationMessage('已取消：未同意发送命令历史，不会调用 AI 命名。');
+      }
+      return;
+    }
+
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
+    const privacyMode = config.get<'sanitized' | 'argv0'>('commandPrivacyMode', 'sanitized');
 
     const provider = createProvider();
     const cwd = getTerminalCwd(terminal);
@@ -235,7 +284,7 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
         cancellable: false
       },
       async () => {
-        const result = await provider.generateName({ commands, language, cwd });
+        const result = await provider.generateName({ commands, language, cwd, privacyMode });
 
         // 记录使用量
         if (result.usage && usageTracker) {
