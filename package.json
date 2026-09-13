@@ -230,6 +230,7 @@
         "terminalAiNamer.commandPrivacyMode": {
           "type": "string",
           "default": "sanitized",
+          "scope": "application",
           "enum": [
             "sanitized",
             "argv0"
@@ -238,7 +239,7 @@
             "脱敏后发送命令行（默认）：遮蔽密钥、Authorization、密码参数等",
             "仅发送命令名（argv0）：不发送参数，隐私最强"
           ],
-          "description": "发送给 AI 的命令历史隐私模式"
+          "description": "发送给 AI 的命令历史隐私模式。仅用户级设置生效；工作区不能覆盖为更宽松的模式。"
         }
       }
     }

@@ -7,11 +7,17 @@ let tracker: TerminalTracker | undefined;
 let terminalTreeProvider: TerminalTreeProvider | undefined;
 let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
+let extensionContext: vscode.ExtensionContext | undefined;
+
+/** globalState key: provider|endpoint fingerprint bound at consent time */
+const CONSENT_DESTINATION_KEY = 'commandHistoryConsentDestination';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('=== Terminal AI Namer 正在激活 ===');
 
   try {
+    extensionContext = context;
+
     // 初始化使用量追踪器
     usageTracker = new UsageTracker(context);
 
@@ -225,14 +231,54 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * Effective upload destination fingerprint (provider + ollama endpoint when relevant).
+ * Consent is bound to this so a workspace cannot silently redirect history after approval.
+ */
+function getHistoryDestinationFingerprint(): string {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const provider = config.get<string>('provider', 'openrouter');
+  if (provider === 'ollama') {
+    const endpoint = config.get<string>('ollamaEndpoint', 'http://localhost:11434');
+    return `ollama|${endpoint}`;
+  }
+  return provider;
+}
+
+/**
+ * Privacy mode must come from user/application settings only — workspace
+ * cannot silently loosen argv0 → sanitized.
+ */
+function getUserPrivacyMode(): 'sanitized' | 'argv0' {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const inspected = config.inspect<'sanitized' | 'argv0'>('commandPrivacyMode');
+  return inspected?.globalValue ?? inspected?.defaultValue ?? 'sanitized';
+}
+
+/**
  * Consent must come from user/application settings only — workspace
  * `.vscode/settings.json` must not be able to self-grant upload permission.
+ * Consent is also bound to the provider/endpoint fingerprint recorded at grant time.
  */
 function hasUserCommandHistoryConsent(): boolean {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
   const inspected = config.inspect<boolean>('allowSendCommandHistory');
-  // application-scoped settings are stored in user/global settings only
-  return inspected?.globalValue === true;
+  if (inspected?.globalValue !== true) {
+    return false;
+  }
+  const consentedFor = extensionContext?.globalState.get<string>(CONSENT_DESTINATION_KEY);
+  if (!consentedFor) {
+    return false;
+  }
+  return consentedFor === getHistoryDestinationFingerprint();
+}
+
+async function bindCommandHistoryConsent(): Promise<void> {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  await config.update('allowSendCommandHistory', true, vscode.ConfigurationTarget.Global);
+  await extensionContext?.globalState.update(
+    CONSENT_DESTINATION_KEY,
+    getHistoryDestinationFingerprint()
+  );
 }
 
 /**
@@ -244,13 +290,25 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
     return true;
   }
 
-  // Auto-rename must not spam consent dialogs — refuse until the setting is enabled.
+  // Auto-rename must not spam consent dialogs — refuse until the setting is enabled
+  // (and bound to the current provider/endpoint).
   if (!interactive) {
     return false;
   }
 
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const inspected = config.inspect<boolean>('allowSendCommandHistory');
+  const destination = getHistoryDestinationFingerprint();
+  const destinationChanged =
+    inspected?.globalValue === true &&
+    extensionContext?.globalState.get<string>(CONSENT_DESTINATION_KEY) !== destination;
+
+  const message = destinationChanged
+    ? `AI 提供商或端点已变更（当前: ${destination}）。需要重新同意后才会将（已脱敏的）命令历史发送到新目标。`
+    : 'Terminal AI Namer 需要将（已脱敏的）命令历史发送到所选 AI 提供商才能生成名称。是否同意？未同意则不会上传命令历史。';
+
   const choice = await vscode.window.showWarningMessage(
-    'Terminal AI Namer 需要将（已脱敏的）命令历史发送到所选 AI 提供商才能生成名称。是否同意？未同意则不会上传命令历史。',
+    message,
     { modal: true },
     '同意并继续',
     '打开设置',
@@ -258,8 +316,7 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
   );
 
   if (choice === '同意并继续') {
-    const config = vscode.workspace.getConfiguration('terminalAiNamer');
-    await config.update('allowSendCommandHistory', true, vscode.ConfigurationTarget.Global);
+    await bindCommandHistoryConsent();
     return true;
   }
 
@@ -291,7 +348,7 @@ async function renameTerminalWithAI(
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
-    const privacyMode = config.get<'sanitized' | 'argv0'>('commandPrivacyMode', 'sanitized');
+    const privacyMode = getUserPrivacyMode();
 
     const provider = createProvider();
     const cwd = getTerminalCwd(terminal);

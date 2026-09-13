@@ -62,6 +62,10 @@ console.log('commandSanitizer');
   assertIncludes(mysql, '[REDACTED]', 'redacts compact -pPASSWORD');
   assertNotIncludes(mysql, 'SecretPass123', 'removes mysql password');
 
+  const numeric = sanitizeCommand('mysql -uroot -p123456 mydb');
+  assertIncludes(numeric, '[REDACTED]', 'redacts numeric compact -pPASSWORD');
+  assertNotIncludes(numeric, '123456', 'removes numeric mysql password');
+
   const flagged = sanitizeCommand('mycli --password=hunter2 query');
   assertIncludes(flagged, '[REDACTED]', 'redacts --password=');
   assertNotIncludes(flagged, 'hunter2', 'removes --password value');
@@ -69,6 +73,13 @@ console.log('commandSanitizer');
   const spaced = sanitizeCommand('tool --password "s3cret!" do-it');
   assertIncludes(spaced, '[REDACTED]', 'redacts --password with space');
   assertNotIncludes(spaced, 's3cret!', 'removes spaced password');
+
+  const quotedPassphrase = sanitizeCommand(
+    'tool --password "correct horse battery staple" run'
+  );
+  assertIncludes(quotedPassphrase, '[REDACTED]', 'redacts quoted passphrase flag value');
+  assertNotIncludes(quotedPassphrase, 'correct horse', 'removes quoted passphrase words');
+  assertIncludes(quotedPassphrase, 'run', 'keeps trailing args after quoted flag');
 }
 
 {
@@ -140,6 +151,20 @@ console.log('commandSanitizer');
   assert(
     sanitizeCommand('FOO="secret phrase" npm run dev', { argv0Only: true }) === 'npm',
     'argv0Only does not leak quoted assignment fragments'
+  );
+  assert(
+    extractArgv0("TOKEN=$(printf 'correct horse battery staple') npm test") === 'npm',
+    'extractArgv0 skips assignment with command substitution'
+  );
+  assert(
+    sanitizeCommand("TOKEN=$(printf 'correct horse battery staple') npm test", {
+      argv0Only: true,
+    }) === 'npm',
+    'argv0Only does not leak substitution fragments'
+  );
+  assert(
+    extractArgv0("TOKEN=`printf secret` npm test") === 'npm',
+    'extractArgv0 skips backtick substitution assignment'
   );
 }
 

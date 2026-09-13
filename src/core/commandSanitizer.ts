@@ -30,12 +30,9 @@ const AUTH_HEADER =
 const SECRET_FLAG_NAMES =
   '-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth|-u|--user';
 
-const SECRET_FLAGS = new RegExp(
-  `(?:^|\\s)(?:${SECRET_FLAG_NAMES})(?:=|\\s+)(['"]?)[^\\s'"]+\\1`,
-  'gi'
-);
+const SECRET_FLAG_PREFIX = new RegExp(`^(${SECRET_FLAG_NAMES})`, 'i');
 
-/** mysql/psql style -pPASSWORD (no space) */
+/** mysql/psql style -pPASSWORD (no space). Glued form is password-bearing; `ps -p 123` uses a space. */
 const COMPACT_PASSWORD_FLAG = /(?:^|\s)-p(?!$)([^\s-][^\s]*)/g;
 
 /** High-entropy tokens (API keys, JWTs, long hex/base64 including `/`) */
@@ -49,7 +46,116 @@ const USERINFO_CREDS = /\b([A-Za-z0-9._-]*):([^@\s/]+)@/g;
 const REDACTED = '[REDACTED]';
 
 /**
- * Skip leading shell VAR=value assignments, including quoted values with spaces.
+ * Advance past a balanced `$(...)` starting at `i` (s[i] === '$' and s[i+1] === '(').
+ */
+function skipDollarParen(s: string, i: number): number {
+  // s[i] === '$', s[i+1] === '('
+  i += 2;
+  let depth = 1;
+  while (i < s.length && depth > 0) {
+    const c = s[i]!;
+    if (c === '\\' && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === '\\' && q === '"' && i + 1 < s.length) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i < s.length) {
+        i++;
+      }
+      continue;
+    }
+    if (c === '`') {
+      i = skipBacktick(s, i);
+      continue;
+    }
+    if (c === '$' && s[i + 1] === '(') {
+      depth++;
+      i += 2;
+      continue;
+    }
+    if (c === '(') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === ')') {
+      depth--;
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Advance past a backtick-quoted substitution starting at `i` (s[i] === '`').
+ */
+function skipBacktick(s: string, i: number): number {
+  i++; // opening `
+  while (i < s.length && s[i] !== '`') {
+    if (s[i] === '\\' && i + 1 < s.length) {
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  if (i < s.length) {
+    i++; // closing `
+  }
+  return i;
+}
+
+/**
+ * Advance past one shell assignment value (quoted, bare, or with $()/`` substitutions).
+ */
+function skipAssignmentValue(s: string, i: number): number {
+  if (s[i] === '"' || s[i] === "'") {
+    const q = s[i]!;
+    i++;
+    while (i < s.length && s[i] !== q) {
+      if (s[i] === '\\' && i + 1 < s.length) {
+        i += 2;
+      } else {
+        i++;
+      }
+    }
+    if (i < s.length) {
+      i++; // closing quote
+    }
+    return i;
+  }
+
+  // Unquoted value: consume until whitespace, treating $()/`` as atomic.
+  while (i < s.length && !/\s/.test(s[i]!)) {
+    if (s[i] === '$' && s[i + 1] === '(') {
+      i = skipDollarParen(s, i);
+      continue;
+    }
+    if (s[i] === '`') {
+      i = skipBacktick(s, i);
+      continue;
+    }
+    if (s[i] === '\\' && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Skip leading shell VAR=value assignments, including quoted values and substitutions.
  */
 function skipLeadingAssignments(command: string): string {
   let i = 0;
@@ -64,24 +170,7 @@ function skipLeadingAssignments(command: string): string {
       break;
     }
     i += m[0].length;
-    if (s[i] === '"' || s[i] === "'") {
-      const q = s[i]!;
-      i++;
-      while (i < s.length && s[i] !== q) {
-        if (s[i] === '\\' && i + 1 < s.length) {
-          i += 2;
-        } else {
-          i++;
-        }
-      }
-      if (i < s.length) {
-        i++; // closing quote
-      }
-    } else {
-      while (i < s.length && !/\s/.test(s[i]!)) {
-        i++;
-      }
-    }
+    i = skipAssignmentValue(s, i);
   }
   return s.slice(i).trimStart();
 }
@@ -127,6 +216,96 @@ function redactHighEntropy(command: string): string {
 }
 
 /**
+ * Consume a flag value that may be quoted (including whitespace inside quotes).
+ * Returns the index just past the value.
+ */
+function skipFlagValue(s: string, i: number): number {
+  while (i < s.length && /\s/.test(s[i]!)) {
+    i++;
+  }
+  if (i >= s.length) {
+    return i;
+  }
+  if (s[i] === '"' || s[i] === "'") {
+    return skipAssignmentValue(s, i);
+  }
+  while (i < s.length && !/\s/.test(s[i]!)) {
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Redact secret CLI flags, including quoted values with whitespace
+ * (e.g. `--password "correct horse battery staple"`).
+ */
+function redactSecretFlags(command: string): string {
+  let result = '';
+  let i = 0;
+  const s = command;
+
+  while (i < s.length) {
+    // Preserve leading whitespace for this token region
+    if (/\s/.test(s[i]!)) {
+      result += s[i];
+      i++;
+      continue;
+    }
+
+    const rest = s.slice(i);
+    const flagMatch = rest.match(SECRET_FLAG_PREFIX);
+    if (!flagMatch) {
+      // Copy until next whitespace (ordinary token)
+      while (i < s.length && !/\s/.test(s[i]!)) {
+        result += s[i];
+        i++;
+      }
+      continue;
+    }
+
+    const flag = flagMatch[1]!;
+    let j = i + flag.length;
+
+    // Single-letter flags like `-pPASSWORD` / `-uroot` are compact forms.
+    // Only treat `-p`/`-u` as spaced/equals flags; leave glued tokens for
+    // COMPACT_PASSWORD_FLAG (and ordinary copying for `-uuser`).
+    const isSingleLetter = /^-[pu]$/i.test(flag);
+    if (isSingleLetter && j < s.length && !/[\s=]/.test(s[j]!)) {
+      while (i < s.length && !/\s/.test(s[i]!)) {
+        result += s[i];
+        i++;
+      }
+      continue;
+    }
+
+    // `--password=value` or `--password value` / `--password "quoted value"`
+    if (s[j] === '=') {
+      j++;
+      j = skipFlagValue(s, j);
+      result += `${flag}=${REDACTED}`;
+      i = j;
+      continue;
+    }
+
+    if (j < s.length && /\s/.test(s[j]!)) {
+      const valueStart = j + (s.slice(j).match(/^\s*/)?.[0].length ?? 0);
+      if (valueStart < s.length) {
+        const afterValue = skipFlagValue(s, j);
+        result += `${flag}=${REDACTED}`;
+        i = afterValue;
+        continue;
+      }
+    }
+
+    // Flag with no value — leave as-is
+    result += flag;
+    i = j;
+  }
+
+  return result;
+}
+
+/**
  * Sanitize a single shell command line for safe inclusion in an AI prompt.
  */
 export function sanitizeCommand(command: string, options: SanitizeOptions = {}): string {
@@ -148,8 +327,6 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
       if (!SECRET_ENV_NAME.test(name)) {
         return full;
       }
-      const value = singleQuoted ?? doubleQuoted ?? bare ?? '';
-      // Reconstruct so only the assignment value is redacted
       const exportPrefix = full.match(/^export\s+/i)?.[0] ?? '';
       const quote =
         singleQuoted !== undefined ? "'" : doubleQuoted !== undefined ? '"' : '';
@@ -165,23 +342,11 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
     return `${m.slice(0, sep + 1)} ${REDACTED}`;
   });
 
-  result = result.replace(SECRET_FLAGS, (m) => {
-    const trimmedFlag = m.trimStart();
-    const flagMatch = trimmedFlag.match(
-      new RegExp(`^(${SECRET_FLAG_NAMES})`, 'i')
-    );
-    const flag = flagMatch ? flagMatch[1] : '--secret';
-    const leading = m.slice(0, m.length - trimmedFlag.length);
-    return `${leading}${flag}=${REDACTED}`;
-  });
+  result = redactSecretFlags(result);
 
-  result = result.replace(COMPACT_PASSWORD_FLAG, (_m, value: string) => {
-    // Avoid rewriting short non-password -p flags like `ps -p 123`
-    if (/^\d+$/.test(value)) {
-      return ` -p${value}`;
-    }
-    return ` -p${REDACTED}`;
-  });
+  // Compact -pPASSWORD (including numeric passwords like -p123456).
+  // Spaced forms such as `ps -p 123` are handled above / left as process selectors.
+  result = result.replace(COMPACT_PASSWORD_FLAG, () => ` -p${REDACTED}`);
 
   result = result.replace(URL_EMBEDDED_CREDS, '://[REDACTED]@');
   result = result.replace(USERINFO_CREDS, '$1:[REDACTED]@');
