@@ -135,12 +135,14 @@ export class TerminalTracker {
       const commandsSnapshot = data.commands.slice(0, this.commandThreshold);
       void Promise.resolve(this.onCommandThresholdReached(terminal, commandsSnapshot))
         .then((result) => {
-          // Only permanent-named on explicit success; skipped/failed renames stay eligible.
-          data!.named = result === true;
+          // Only promote to named on explicit success. On skip/failure, leave
+          // an already-true named flag intact so a concurrent successful manual
+          // rename (markAsNamed) is not overwritten back to false.
+          if (result === true) {
+            data!.named = true;
+          }
         })
-        .catch(() => {
-          data!.named = false;
-        })
+        .catch(() => undefined)
         .finally(() => {
           data!.namingInProgress = false;
         });

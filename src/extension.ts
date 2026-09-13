@@ -341,6 +341,13 @@ async function renameTerminalSafely(
   name: string
 ): Promise<boolean> {
   return withRenameLock(async () => {
+    // Already has the intended title — skip focus/dispatch entirely so an
+    // idempotent retry cannot rename a collateral terminal mid-dispatch and
+    // still observe terminal.name === name as "success".
+    if (terminal.name === name) {
+      return true;
+    }
+
     for (let attempt = 1; attempt <= RENAME_FOCUS_MAX_ATTEMPTS; attempt++) {
       const focused = await waitForTerminalFocus(terminal, RENAME_FOCUS_TIMEOUT_MS);
       if (!focused || vscode.window.activeTerminal !== terminal) {
@@ -351,6 +358,12 @@ async function renameTerminalSafely(
       const nameByTerminal = new Map<vscode.Terminal, string>();
       for (const t of vscode.window.terminals) {
         nameByTerminal.set(t, t.name);
+      }
+
+      // Re-check after snapshot: a concurrent rename may have set the title
+      // while we waited for focus; still skip dispatch in that case.
+      if (nameByTerminal.get(terminal) === name) {
+        return true;
       }
 
       // Final pre-dispatch snapshot — still best-effort under API limits.
