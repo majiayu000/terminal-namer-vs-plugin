@@ -20,9 +20,11 @@ export async function activate(context: vscode.ExtensionContext) {
     extensionSecrets = context.secrets;
 
     // Migrate plaintext API keys before any SecretStorage consumers register.
-    await migrateApiKeysFromSettings(context.secrets);
+    // Cleanup failures must not abort activation (Ollama / existing secrets still work).
+    await runApiKeyMigration(context.secrets, { replaceExisting: false });
 
-    // If a user later sets a deprecated plaintext key in settings, migrate it.
+    // If a user later sets a deprecated plaintext key in settings, migrate it
+    // and replace any existing SecretStorage value for that scope.
     const legacyKeys = new Set(
       getLegacyConfigKeys().map((key) => `terminalAiNamer.${key}`)
     );
@@ -31,7 +33,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (![...legacyKeys].some((key) => event.affectsConfiguration(key))) {
           return;
         }
-        await migrateApiKeysFromSettings(context.secrets);
+        await runApiKeyMigration(context.secrets, { replaceExisting: true });
         settingsSidebarProvider?.refreshSettings();
       })
     );
@@ -224,25 +226,53 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 /**
+ * 获取终端当前工作目录 URI（Shell Integration）
+ */
+function getTerminalCwdUri(terminal: vscode.Terminal): vscode.Uri | undefined {
+  try {
+    return terminal.shellIntegration?.cwd;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 获取终端当前目录名（只是最后一级）
  */
-function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
-  try {
-    // VSCode 1.93+ Shell Integration API
-    const cwd = terminal.shellIntegration?.cwd;
-    if (cwd) {
-      // 只取最后一级目录名
-      const parts = cwd.fsPath.split(/[/\\]/);
-      const dirName = parts[parts.length - 1];
-      // 过滤掉用户目录名或无意义的名称
-      if (dirName && !['~', 'home', 'Users', 'user'].includes(dirName)) {
-        return dirName;
-      }
-    }
-  } catch {
-    // Shell Integration 不可用
+function getTerminalCwdName(terminal: vscode.Terminal): string | undefined {
+  const cwd = getTerminalCwdUri(terminal);
+  if (!cwd) {
+    return undefined;
+  }
+  const parts = cwd.fsPath.split(/[/\\]/);
+  const dirName = parts[parts.length - 1];
+  if (dirName && !['~', 'home', 'Users', 'user'].includes(dirName)) {
+    return dirName;
   }
   return undefined;
+}
+
+async function runApiKeyMigration(
+  secrets: vscode.SecretStorage,
+  options: { replaceExisting: boolean }
+): Promise<void> {
+  try {
+    const result = await migrateApiKeysFromSettings(secrets, options);
+    if (result.cleanupFailures.length > 0) {
+      console.warn(
+        'Terminal AI Namer: plaintext API key cleanup failed:',
+        result.cleanupFailures
+      );
+      vscode.window.showWarningMessage(
+        `Terminal AI Namer: migrated API keys to SecretStorage, but could not clear plaintext settings (${result.cleanupFailures.length} scope(s)). Remove them manually if settings files are read-only.`
+      );
+    }
+  } catch (error) {
+    console.error('Terminal AI Namer: API key migration failed:', error);
+    vscode.window.showWarningMessage(
+      `Terminal AI Namer: API key migration had an error; continuing activation. ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 /**
@@ -256,8 +286,9 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
     if (!extensionSecrets) {
       throw new Error('扩展未完成初始化');
     }
-    const provider = await createProvider(extensionSecrets);
-    const cwd = getTerminalCwd(terminal);
+    const resource = getTerminalCwdUri(terminal);
+    const provider = await createProvider(extensionSecrets, resource);
+    const cwd = getTerminalCwdName(terminal);
 
     await vscode.window.withProgress(
       {

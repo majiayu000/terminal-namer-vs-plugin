@@ -10,16 +10,18 @@ export type ProviderType = 'openai' | 'claude' | 'ollama' | 'openrouter';
 
 /**
  * 根据配置创建 AI Provider（API Key 来自 SecretStorage）
+ * @param resource Optional URI (e.g. terminal cwd) to resolve folder-scoped keys.
  */
 export async function createProvider(
-  secrets: vscode.SecretStorage
+  secrets: vscode.SecretStorage,
+  resource?: vscode.Uri
 ): Promise<AIProvider> {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
   const provider = config.get<ProviderType>('provider', 'openrouter');
 
   switch (provider) {
     case 'openai': {
-      const apiKey = await getApiKey(secrets, 'openai');
+      const apiKey = await getApiKey(secrets, 'openai', resource);
       if (!apiKey) {
         throw new Error(
           '请先在侧边栏「快捷设置」中配置 OpenAI API Key（SecretStorage）'
@@ -29,7 +31,7 @@ export async function createProvider(
     }
 
     case 'claude': {
-      const apiKey = await getApiKey(secrets, 'claude');
+      const apiKey = await getApiKey(secrets, 'claude', resource);
       if (!apiKey) {
         throw new Error(
           '请先在侧边栏「快捷设置」中配置 Claude API Key（SecretStorage）'
@@ -45,7 +47,7 @@ export async function createProvider(
     }
 
     case 'openrouter': {
-      const apiKey = await getApiKey(secrets, 'openrouter');
+      const apiKey = await getApiKey(secrets, 'openrouter', resource);
       if (!apiKey) {
         throw new Error(
           '请先在侧边栏「快捷设置」中配置 OpenRouter API Key（SecretStorage）'

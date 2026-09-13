@@ -57,33 +57,51 @@ function currentWorkspaceId(): string | undefined {
     .join('|')}`;
 }
 
-async function storeIfAbsent(
+async function storeMigratedSecret(
   secrets: vscode.SecretStorage,
   key: string,
-  value: string
+  value: string,
+  replaceExisting: boolean
 ): Promise<void> {
-  const existing = await secrets.get(key);
-  if (!existing) {
-    await secrets.store(key, value);
+  if (!replaceExisting) {
+    const existing = await secrets.get(key);
+    if (existing) {
+      return;
+    }
   }
+  await secrets.store(key, value);
 }
 
 /**
  * Resolve API key with VS Code-like precedence:
- * workspace-folder > workspace > global/legacy unscoped.
+ * matching workspace-folder (when resource given) > workspace > global/legacy.
+ * Without a resource, any folder override counts as "configured" for settings UI.
  */
 export async function getApiKey(
   secrets: vscode.SecretStorage,
-  provider: ApiKeyProvider
+  provider: ApiKeyProvider,
+  resource?: vscode.Uri
 ): Promise<string | undefined> {
   const folders = vscode.workspace.workspaceFolders;
   if (folders) {
-    for (const folder of folders) {
-      const folderValue = await secrets.get(
-        folderSecretKey(provider, folder.uri.toString())
-      );
-      if (folderValue) {
-        return folderValue;
+    if (resource) {
+      const matchingFolder = vscode.workspace.getWorkspaceFolder(resource);
+      if (matchingFolder) {
+        const folderValue = await secrets.get(
+          folderSecretKey(provider, matchingFolder.uri.toString())
+        );
+        if (folderValue) {
+          return folderValue;
+        }
+      }
+    } else {
+      for (const folder of folders) {
+        const folderValue = await secrets.get(
+          folderSecretKey(provider, folder.uri.toString())
+        );
+        if (folderValue) {
+          return folderValue;
+        }
       }
     }
   }
@@ -169,18 +187,47 @@ async function clearLegacyScope(
   config: vscode.WorkspaceConfiguration,
   legacyKey: string,
   target: vscode.ConfigurationTarget
-): Promise<void> {
-  await config.update(legacyKey, undefined, target);
+): Promise<string | undefined> {
+  try {
+    await config.update(legacyKey, undefined, target);
+    return undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `Failed to clear terminalAiNamer.${legacyKey} (${configurationTargetLabel(target)}): ${message}`;
+  }
+}
+
+function configurationTargetLabel(target: vscode.ConfigurationTarget): string {
+  switch (target) {
+    case vscode.ConfigurationTarget.Global:
+      return 'Global';
+    case vscode.ConfigurationTarget.Workspace:
+      return 'Workspace';
+    case vscode.ConfigurationTarget.WorkspaceFolder:
+      return 'WorkspaceFolder';
+    default:
+      return String(target);
+  }
+}
+
+export interface MigrateApiKeysResult {
+  cleanupFailures: string[];
 }
 
 /**
- * One-time migration: copy plaintext API keys from each configuration scope into
- * a matching SecretStorage key, then clear only that scope. Multi-root folders
- * are inspected with a resource-scoped configuration.
+ * Copy plaintext API keys from each configuration scope into a matching
+ * SecretStorage key, then clear only that scope. Multi-root folders are
+ * inspected with a resource-scoped configuration.
+ *
+ * @param replaceExisting When true (later deprecated-setting edits), overwrite
+ *   existing SecretStorage values. Initial activation keeps store-if-absent.
  */
 export async function migrateApiKeysFromSettings(
-  secrets: vscode.SecretStorage
-): Promise<void> {
+  secrets: vscode.SecretStorage,
+  options?: { replaceExisting?: boolean }
+): Promise<MigrateApiKeysResult> {
+  const replaceExisting = options?.replaceExisting === true;
+  const cleanupFailures: string[] = [];
   const providers: ApiKeyProvider[] = ['openrouter', 'openai', 'claude'];
   const rootConfig = vscode.workspace.getConfiguration('terminalAiNamer');
 
@@ -190,12 +237,20 @@ export async function migrateApiKeysFromSettings(
 
     const globalValue = inspected?.globalValue;
     if (typeof globalValue === 'string' && globalValue.length > 0) {
-      await storeIfAbsent(secrets, globalSecretKey(provider), globalValue);
-      await clearLegacyScope(
+      await storeMigratedSecret(
+        secrets,
+        globalSecretKey(provider),
+        globalValue,
+        replaceExisting
+      );
+      const failure = await clearLegacyScope(
         rootConfig,
         legacyKey,
         vscode.ConfigurationTarget.Global
       );
+      if (failure) {
+        cleanupFailures.push(failure);
+      }
     }
 
     const workspaceValue = inspected?.workspaceValue;
@@ -205,16 +260,20 @@ export async function migrateApiKeysFromSettings(
       workspaceValue.length > 0 &&
       workspaceId
     ) {
-      await storeIfAbsent(
+      await storeMigratedSecret(
         secrets,
         workspaceSecretKey(provider, workspaceId),
-        workspaceValue
+        workspaceValue,
+        replaceExisting
       );
-      await clearLegacyScope(
+      const failure = await clearLegacyScope(
         rootConfig,
         legacyKey,
         vscode.ConfigurationTarget.Workspace
       );
+      if (failure) {
+        cleanupFailures.push(failure);
+      }
     }
 
     const folders = vscode.workspace.workspaceFolders;
@@ -233,16 +292,22 @@ export async function migrateApiKeysFromSettings(
         continue;
       }
 
-      await storeIfAbsent(
+      await storeMigratedSecret(
         secrets,
         folderSecretKey(provider, folder.uri.toString()),
-        folderValue
+        folderValue,
+        replaceExisting
       );
-      await clearLegacyScope(
+      const failure = await clearLegacyScope(
         folderConfig,
         legacyKey,
         vscode.ConfigurationTarget.WorkspaceFolder
       );
+      if (failure) {
+        cleanupFailures.push(failure);
+      }
     }
   }
+
+  return { cleanupFailures };
 }
