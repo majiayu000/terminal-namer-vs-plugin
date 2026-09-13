@@ -18,6 +18,11 @@ let renameMutex: Promise<void> = Promise.resolve();
 const RENAME_FOCUS_MAX_ATTEMPTS = 3;
 /** Max time to wait for onDidChangeActiveTerminal after terminal.show(). */
 const RENAME_FOCUS_TIMEOUT_MS = 1500;
+/**
+ * How many nested collateral undoes a failed renameWithArg dispatch may attempt.
+ * Bounds focus-steal recovery without unbounded recursion across terminals.
+ */
+const RENAME_COLLATERAL_UNDO_DEPTH = 2;
 
 function withRenameLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = renameMutex.then(fn, fn);
@@ -287,10 +292,15 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 /**
  * One-shot renameWithArg under the rename mutex (does not re-acquire it).
  * Returns true only when `terminal.name` matches `name` after dispatch.
+ *
+ * If focus drifts mid-dispatch and another terminal receives `name`, restore
+ * that collateral title (bounded by `collateralDepth`) before returning false
+ * so callers do not abandon wrongly renamed terminals.
  */
 async function dispatchRenameWithArg(
   terminal: vscode.Terminal,
-  name: string
+  name: string,
+  collateralDepth = RENAME_COLLATERAL_UNDO_DEPTH
 ): Promise<boolean> {
   if (terminal.name === name) {
     return true;
@@ -301,6 +311,11 @@ async function dispatchRenameWithArg(
     return false;
   }
 
+  const nameByTerminal = new Map<vscode.Terminal, string>();
+  for (const t of vscode.window.terminals) {
+    nameByTerminal.set(t, t.name);
+  }
+
   // Final pre-dispatch check — still best-effort under API limits.
   if (vscode.window.activeTerminal !== terminal) {
     return false;
@@ -309,7 +324,37 @@ async function dispatchRenameWithArg(
   await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
     name
   });
-  return terminal.name === name;
+
+  if (terminal.name === name) {
+    return true;
+  }
+
+  // Mid-dispatch focus steal: roll back any terminal that wrongly received
+  // `name` before reporting failure to the caller.
+  if (collateralDepth > 0) {
+    for (const candidate of vscode.window.terminals) {
+      if (candidate === terminal) {
+        continue;
+      }
+      const prior = nameByTerminal.get(candidate);
+      if (prior === undefined || prior === name) {
+        continue;
+      }
+      if (candidate.name !== name) {
+        continue;
+      }
+      const restored = await dispatchRenameWithArg(
+        candidate,
+        prior,
+        collateralDepth - 1
+      );
+      if (!restored || candidate.name !== prior) {
+        return false;
+      }
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -351,7 +396,8 @@ async function restoreTerminalName(
   }
 
   // Mid-restore focus steal: recover any tertiary terminal that now bears
-  // previousName (one-shot, no nested retry) before reporting failure.
+  // previousName before reporting failure. dispatchRenameWithArg also rolls
+  // back collateral from its own mid-undo focus steal (bounded depth).
   for (const candidate of vscode.window.terminals) {
     if (candidate === terminal) {
       continue;
@@ -364,7 +410,7 @@ async function restoreTerminalName(
       continue;
     }
     const undone = await dispatchRenameWithArg(candidate, prior);
-    if (!undone) {
+    if (!undone || candidate.name !== prior) {
       return false;
     }
   }
