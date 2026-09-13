@@ -532,10 +532,11 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
       const payload = { command: 'saveSettings', settings: settings };
       const typedKey = document.getElementById('apiKey').value;
-      if (clearRequested) {
-        payload.apiKey = '';
-      } else if (typedKey) {
+      // A typed replacement wins over a prior Clear click.
+      if (typedKey) {
         payload.apiKey = typedKey;
+      } else if (clearRequested) {
+        payload.apiKey = '';
       }
 
       vscode.postMessage(payload);
@@ -547,6 +548,12 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     document.getElementById('toggleApiKeyBtn').addEventListener('click', function () {
       const input = document.getElementById('apiKey');
       input.type = input.type === 'password' ? 'text' : 'password';
+    });
+    document.getElementById('apiKey').addEventListener('input', function () {
+      if (document.getElementById('apiKey').value) {
+        clearRequested = false;
+        updateApiKeyUi();
+      }
     });
     document.getElementById('clearApiKeyBtn').addEventListener('click', function () {
       clearRequested = true;
