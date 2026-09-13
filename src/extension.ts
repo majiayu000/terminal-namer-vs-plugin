@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker } from './core';
 import { createProvider } from './providers';
-import { migrateApiKeysFromConfig } from './secrets';
+import { migrateApiKeysFromConfig, affectsLegacyApiKeyConfiguration } from './secrets';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
 let tracker: TerminalTracker | undefined;
@@ -64,6 +64,19 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.onDidOpenTerminal(() => terminalTreeProvider?.refresh()),
       vscode.window.onDidCloseTerminal(() => terminalTreeProvider?.refresh()),
       vscode.window.onDidChangeActiveTerminal(() => terminalTreeProvider?.refresh())
+    );
+
+    // Re-run migration when legacy plaintext keys appear after activation
+    // (Settings Sync, another window, etc.).
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!affectsLegacyApiKeyConfiguration(e)) {
+          return;
+        }
+        void migrateApiKeysFromConfig(context).catch((migrationError) => {
+          console.error('API key migration failed after config change:', migrationError);
+        });
+      })
     );
 
     // 注册命令：打开设置面板（打开 VSCode 设置）

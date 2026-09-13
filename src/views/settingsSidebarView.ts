@@ -62,6 +62,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           vscode.window.showInformationMessage('API Key 已清除');
           await this._sendCurrentSettings();
           break;
+        case 'checkApiKey':
+          await this._sendApiKeyStatus(message.provider);
+          break;
         case 'getSettings':
           await this._sendCurrentSettings();
           this.updateStats();
@@ -92,6 +95,32 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
     await deleteApiKey(this._context, secretProvider);
+  }
+
+  private async _sendApiKeyStatus(provider: unknown) {
+    if (!this._view) {
+      return;
+    }
+
+    if (provider === 'ollama') {
+      this._view.webview.postMessage({
+        command: 'apiKeyStatus',
+        provider,
+        hasApiKey: true,
+      });
+      return;
+    }
+
+    const secretProvider = this._providerFromSettings(provider);
+    const configured = secretProvider
+      ? await hasApiKey(this._context, secretProvider)
+      : false;
+
+    this._view.webview.postMessage({
+      command: 'apiKeyStatus',
+      provider,
+      hasApiKey: configured,
+    });
   }
 
   private async _saveSettings(settings: Record<string, unknown>) {
@@ -380,8 +409,13 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       syncProviderUi();
       // Pending typed key must not apply to a different provider.
       document.getElementById('apiKey').value = '';
-      hasExistingApiKey = false;
-      updateStatus(false);
+      const provider = document.getElementById('provider').value;
+      if (provider === 'ollama') {
+        updateStatus(true);
+        return;
+      }
+      // Query SecretStorage for the newly selected provider instead of forcing missing.
+      vscode.postMessage({ command: 'checkApiKey', provider });
     }
 
     function clearApiKey() {
@@ -482,6 +516,13 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         updateStatus(!!s.hasApiKey);
+        syncProviderUi();
+      } else if (message.command === 'apiKeyStatus') {
+        // Ignore stale replies if the user already changed selection again.
+        if (message.provider !== document.getElementById('provider').value) {
+          return;
+        }
+        updateStatus(!!message.hasApiKey);
         syncProviderUi();
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);

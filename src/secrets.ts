@@ -16,6 +16,18 @@ const LEGACY_CONFIG_KEYS: Record<ApiKeyProvider, string> = {
   claude: 'claudeApiKey',
 };
 
+/** Full configuration ids for leftover plaintext API keys (migration listeners). */
+export const LEGACY_API_KEY_CONFIGURATION_IDS = (
+  Object.values(LEGACY_CONFIG_KEYS) as string[]
+).map((key) => `terminalAiNamer.${key}`);
+
+/** True when a configuration change may introduce leftover plaintext API keys. */
+export function affectsLegacyApiKeyConfiguration(
+  e: vscode.ConfigurationChangeEvent
+): boolean {
+  return LEGACY_API_KEY_CONFIGURATION_IDS.some((id) => e.affectsConfiguration(id));
+}
+
 const LEGACY_SCOPES: vscode.ConfigurationTarget[] = [
   vscode.ConfigurationTarget.Global,
   vscode.ConfigurationTarget.Workspace,
@@ -74,12 +86,14 @@ function readScopedString(
 }
 
 /**
- * Clear a legacy plaintext API key from every configuration scope that still
- * holds a value (global, workspace, and workspace-folder).
+ * Clear legacy plaintext values that match the retained SecretStorage key.
+ * Scopes with a different non-empty value are left untouched so a conflicting
+ * workspace credential is not destroyed when another workspace already migrated.
  */
-async function clearLegacyKeyAllScopes(
+async function clearCompatibleLegacyScopes(
   config: vscode.WorkspaceConfiguration,
-  configKey: string
+  configKey: string,
+  retainedSecret: string
 ): Promise<void> {
   const inspected = config.inspect<string>(configKey);
   if (!inspected) {
@@ -87,7 +101,8 @@ async function clearLegacyKeyAllScopes(
   }
 
   for (const target of LEGACY_SCOPES) {
-    if (readScopedString(inspected, target) !== undefined) {
+    const scoped = readScopedString(inspected, target);
+    if (typeof scoped === 'string' && scoped.length > 0 && scoped === retainedSecret) {
       await config.update(configKey, undefined, target);
     }
   }
@@ -133,29 +148,40 @@ export async function migrateApiKeysFromConfig(
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
 
   for (const provider of Object.keys(LEGACY_CONFIG_KEYS) as ApiKeyProvider[]) {
-    const configKey = LEGACY_CONFIG_KEYS[provider];
-    // After removal from package.json contributes, prefer inspect() for leftover user values.
-    const inspected = config.inspect<string>(configKey);
-    const hasScopedLegacy =
-      (typeof inspected?.globalValue === 'string' && inspected.globalValue.length > 0) ||
-      (typeof inspected?.workspaceValue === 'string' && inspected.workspaceValue.length > 0) ||
-      (typeof inspected?.workspaceFolderValue === 'string' &&
-        inspected.workspaceFolderValue.length > 0);
+    try {
+      const configKey = LEGACY_CONFIG_KEYS[provider];
+      // After removal from package.json contributes, prefer inspect() for leftover user values.
+      const inspected = config.inspect<string>(configKey);
+      const hasScopedLegacy =
+        (typeof inspected?.globalValue === 'string' && inspected.globalValue.length > 0) ||
+        (typeof inspected?.workspaceValue === 'string' && inspected.workspaceValue.length > 0) ||
+        (typeof inspected?.workspaceFolderValue === 'string' &&
+          inspected.workspaceFolderValue.length > 0);
 
-    const fallback = config.get<string>(configKey, '') || '';
-    const legacyValue = effectiveLegacyValue(inspected, fallback);
+      const fallback = config.get<string>(configKey, '') || '';
+      const legacyValue = effectiveLegacyValue(inspected, fallback);
 
-    if (!hasScopedLegacy && !legacyValue) {
-      continue;
-    }
+      if (!hasScopedLegacy && !legacyValue) {
+        continue;
+      }
 
-    if (legacyValue) {
+      if (!legacyValue) {
+        continue;
+      }
+
       const existing = await context.secrets.get(SECRET_KEYS[provider]);
       if (!existing) {
         await context.secrets.store(SECRET_KEYS[provider], legacyValue);
+        await clearCompatibleLegacyScopes(config, configKey, legacyValue);
+        continue;
       }
-    }
 
-    await clearLegacyKeyAllScopes(config, configKey);
+      // Keep SecretStorage as source of truth. Only remove plaintext that matches
+      // the stored secret; leave conflicting workspace/user values in place.
+      await clearCompatibleLegacyScopes(config, configKey, existing);
+    } catch (providerError) {
+      // Isolate per-provider failures so one read-only cleanup cannot skip the rest.
+      console.error(`API key migration failed for provider ${provider}:`, providerError);
+    }
   }
 }
