@@ -32,9 +32,12 @@ const SECRET_FLAG_NAMES =
 
 const SECRET_FLAG_EXACT = new RegExp(`^(${SECRET_FLAG_NAMES})$`, 'i');
 
-/** Commands where short `-p` / `-u` typically carry credentials (not python -u, sort -u, …). */
+/**
+ * Commands where short `-p` / `-u` typically carry credentials (not python -u, sort -u, …).
+ * `docker` is limited to `docker login` so `docker compose -p project` stays intact.
+ */
 const CREDENTIAL_SHORT_FLAG_COMMANDS =
-  /(^|[\s/\\])(curl|wget|mysql|mysqldump|mariadb|psql|pg_dump|mongo|mongosh|redis-cli|mycli)(?=\s|$)/i;
+  /(^|[\s/\\])(?:curl|wget|mysql|mysqldump|mariadb|psql|pg_dump|mongo|mongosh|redis-cli|mycli|sshpass|docker(?=\s+login\b))(?=\s|$)/i;
 
 /** mysql/psql style -pPASSWORD (no space). Glued form is password-bearing; `ps -p 123` uses a space. */
 const COMPACT_PASSWORD_FLAG = /(?:^|\s)-p(?!$)([^\s-][^\s]*)/g;

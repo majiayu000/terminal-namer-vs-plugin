@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker, RenameAttemptResult } from './core';
 import { createProvider } from './providers';
@@ -9,7 +10,7 @@ let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
 let extensionContext: vscode.ExtensionContext | undefined;
 
-/** globalState key: provider|endpoint fingerprint bound at consent time */
+/** globalState key: provider|credential fingerprint bound at consent time */
 const CONSENT_DESTINATION_KEY = 'commandHistoryConsentDestination';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -257,8 +258,20 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
- * Effective upload destination fingerprint (provider + ollama endpoint when relevant).
- * Consent is bound to this so a workspace cannot silently redirect history after approval.
+ * Digest of the credential createProvider would actually use (effective config).
+ * Workspace-overridden API keys therefore change the consent fingerprint.
+ */
+function digestCredential(value: string): string {
+  if (!value) {
+    return 'none';
+  }
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+/**
+ * Effective upload destination fingerprint (provider + credential/endpoint).
+ * Consent is bound to this so a workspace cannot silently redirect history after
+ * approval by swapping provider/API-key settings that createProvider reads.
  */
 function getHistoryDestinationFingerprint(): string {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
@@ -267,7 +280,14 @@ function getHistoryDestinationFingerprint(): string {
     const endpoint = config.get<string>('ollamaEndpoint', 'http://localhost:11434');
     return `ollama|${endpoint}`;
   }
-  return provider;
+  const apiKeySetting =
+    provider === 'openai'
+      ? 'openaiApiKey'
+      : provider === 'claude'
+        ? 'claudeApiKey'
+        : 'openrouterApiKey';
+  const apiKey = config.get<string>(apiKeySetting, '');
+  return `${provider}|${digestCredential(apiKey)}`;
 }
 
 /**
@@ -330,7 +350,7 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
     extensionContext?.globalState.get<string>(CONSENT_DESTINATION_KEY) !== destination;
 
   const message = destinationChanged
-    ? `AI 提供商或端点已变更（当前: ${destination}）。需要重新同意后才会将（已脱敏的）命令历史发送到新目标。`
+    ? `AI 提供商、端点或 API Key 已变更（当前: ${destination}）。需要重新同意后才会将（已脱敏的）命令历史发送到新目标。`
     : 'Terminal AI Namer 需要将（已脱敏的）命令历史发送到所选 AI 提供商才能生成名称。是否同意？未同意则不会上传命令历史。';
 
   const choice = await vscode.window.showWarningMessage(

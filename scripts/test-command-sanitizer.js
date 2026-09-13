@@ -388,6 +388,18 @@ console.log('commandSanitizer');
   const findP = sanitizeCommand('find . -print');
   assertIncludes(findP, '-print', 'keeps find -print');
   assertNotIncludes(findP, '[REDACTED]', 'does not redact find -print as -p');
+
+  const dockerLogin = sanitizeCommand('docker login -p hunter2');
+  assertIncludes(dockerLogin, '[REDACTED]', 'redacts docker login -p');
+  assertNotIncludes(dockerLogin, 'hunter2', 'removes docker login password');
+
+  const dockerCompose = sanitizeCommand('docker compose -p myproject up');
+  assertIncludes(dockerCompose, '-p myproject', 'keeps docker compose project -p');
+  assertNotIncludes(dockerCompose, '[REDACTED]', 'does not redact docker compose -p');
+
+  const sshpass = sanitizeCommand('sshpass -p hunter2 ssh host');
+  assertIncludes(sshpass, '[REDACTED]', 'redacts sshpass -p');
+  assertNotIncludes(sshpass, 'hunter2', 'removes sshpass password');
 }
 
 {
