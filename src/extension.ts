@@ -1,17 +1,24 @@
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker } from './core';
 import { createProvider } from './providers';
+import { migrateApiKeysFromConfig } from './secrets';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
 let tracker: TerminalTracker | undefined;
 let terminalTreeProvider: TerminalTreeProvider | undefined;
 let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
+let extensionContext: vscode.ExtensionContext | undefined;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   console.log('=== Terminal AI Namer 正在激活 ===');
 
   try {
+    extensionContext = context;
+
+    // 一次性迁移：明文 settings → SecretStorage
+    await migrateApiKeysFromConfig(context);
+
     // 初始化使用量追踪器
     usageTracker = new UsageTracker(context);
 
@@ -26,7 +33,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerTreeDataProvider('terminalAiNamer.terminalList', terminalTreeProvider);
 
     // 初始化侧边栏 - 设置面板
-    settingsSidebarProvider = new SettingsSidebarProvider(context.extensionUri, usageTracker);
+    settingsSidebarProvider = new SettingsSidebarProvider(
+      context.extensionUri,
+      context,
+      usageTracker
+    );
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider(
         SettingsSidebarProvider.viewType,
@@ -225,7 +236,10 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
 
-    const provider = createProvider();
+    if (!extensionContext) {
+      throw new Error('Extension context unavailable');
+    }
+    const provider = await createProvider(extensionContext);
     const cwd = getTerminalCwd(terminal);
 
     await vscode.window.withProgress(

@@ -51,14 +51,13 @@ Also supports:
 
 ### 2. Configure Extension
 
-Click the terminal icon in the sidebar and enter your API Key in the settings panel.
+Click the terminal icon in the sidebar and enter your API Key in the settings panel. Keys are stored in VS Code **SecretStorage** (not `settings.json` / Settings Sync).
 
-Or configure via VS Code settings:
+Non-secret options can still be set via VS Code settings:
 
 ```json
 {
   "terminalAiNamer.provider": "openrouter",
-  "terminalAiNamer.openrouterApiKey": "your-api-key",
   "terminalAiNamer.openrouterModel": "google/gemini-2.5-flash",
   "terminalAiNamer.autoRename": true,
   "terminalAiNamer.commandThreshold": 3,
@@ -66,20 +65,21 @@ Or configure via VS Code settings:
 }
 ```
 
+> **Migration:** If you previously set `openrouterApiKey` / `openaiApiKey` / `claudeApiKey` in settings, the extension migrates them into SecretStorage on first activation and clears the plaintext values.
+
 ## Configuration Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `provider` | AI service provider | `openrouter` |
-| `openrouterApiKey` | OpenRouter API Key | - |
 | `openrouterModel` | OpenRouter model | `google/gemini-2.5-flash` |
-| `openaiApiKey` | OpenAI API Key | - |
-| `claudeApiKey` | Claude API Key | - |
 | `ollamaEndpoint` | Ollama service URL | `http://localhost:11434` |
 | `ollamaModel` | Ollama model name | `llama3.2` |
 | `autoRename` | Auto rename terminals | `true` |
 | `commandThreshold` | Commands before auto-rename | `3` |
 | `language` | Naming language (zh/en) | `zh` |
+
+API keys are managed only via the sidebar settings panel (SecretStorage), never as configuration properties.
 
 ## Recommended Models
 
@@ -126,7 +126,8 @@ Or configure via VS Code settings:
 
 - Only sends terminal commands to your configured AI service
 - Does not collect any user data
-- All settings stored locally
+- API keys are stored in VS Code SecretStorage (not plaintext settings)
+- Non-secret settings are stored locally
 
 ## Feedback
 

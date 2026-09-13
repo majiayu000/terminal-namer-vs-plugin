@@ -4,19 +4,22 @@ import { OpenAIProvider } from './openai';
 import { ClaudeProvider } from './claude';
 import { OllamaProvider } from './ollama';
 import { OpenRouterProvider } from './openrouter';
+import { getApiKey } from '../secrets';
 
 export type ProviderType = 'openai' | 'claude' | 'ollama' | 'openrouter';
 
 /**
- * 根据配置创建 AI Provider
+ * 根据配置创建 AI Provider（API Key 从 SecretStorage 读取）
  */
-export function createProvider(): AIProvider {
+export async function createProvider(
+  context: vscode.ExtensionContext
+): Promise<AIProvider> {
   const config = vscode.workspace.getConfiguration('terminalAiNamer');
   const provider = config.get<ProviderType>('provider', 'openrouter');
 
   switch (provider) {
     case 'openai': {
-      const apiKey = config.get<string>('openaiApiKey', '');
+      const apiKey = await getApiKey(context, 'openai');
       if (!apiKey) {
         throw new Error('请先配置 OpenAI API Key');
       }
@@ -24,7 +27,7 @@ export function createProvider(): AIProvider {
     }
 
     case 'claude': {
-      const apiKey = config.get<string>('claudeApiKey', '');
+      const apiKey = await getApiKey(context, 'claude');
       if (!apiKey) {
         throw new Error('请先配置 Claude API Key');
       }
@@ -38,7 +41,7 @@ export function createProvider(): AIProvider {
     }
 
     case 'openrouter': {
-      const apiKey = config.get<string>('openrouterApiKey', '');
+      const apiKey = await getApiKey(context, 'openrouter');
       if (!apiKey) {
         throw new Error('请先配置 OpenRouter API Key');
       }
