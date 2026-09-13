@@ -17,7 +17,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      await renameTerminalWithAI(terminal, commands);
+      // Auto-rename set renaming=true before this callback; only this call may clear it.
+      await renameTerminalWithAI(terminal, commands, { ownsInFlight: true });
       terminalTreeProvider?.refresh();
     });
 
@@ -219,8 +220,17 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 
 /**
  * 使用 AI 重命名终端
+ *
+ * @param ownsInFlight When true, this call owns the terminal's auto-rename
+ *   in-flight flag and may clear it on failure. Manual renames omit this so a
+ *   concurrent failure cannot drop another request's duplicate-request guard.
  */
-async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[]) {
+async function renameTerminalWithAI(
+  terminal: vscode.Terminal,
+  commands: string[],
+  options?: { ownsInFlight?: boolean }
+) {
+  const ownsInFlight = options?.ownsInFlight === true;
   try {
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
@@ -264,10 +274,11 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
       }
     );
   } catch (error) {
-    // Only auto-rename owns in-flight state. Manual rename failures must not
-    // clear named=true or they can re-trigger auto-rename on the next command.
-    if (tracker?.isInFlight(terminal)) {
-      tracker.clearInFlight(terminal);
+    // Clear in-flight only when this call owns it (auto-rename). Manual rename
+    // failures must not clear another outstanding auto request's guard, and
+    // must not reset named=true (which would re-trigger auto-rename).
+    if (ownsInFlight) {
+      tracker?.clearInFlight(terminal);
     }
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);

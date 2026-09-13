@@ -159,19 +159,13 @@ export class TerminalTracker {
 
   /**
    * Clear in-flight rename state so a later command can retry auto-rename.
+   * Call only from the auto-rename request that owns the flag.
    */
   clearInFlight(terminal: vscode.Terminal) {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.renaming = false;
     }
-  }
-
-  /**
-   * True while auto-rename owns an outstanding AI request for this terminal.
-   */
-  isInFlight(terminal: vscode.Terminal): boolean {
-    return this.terminalDataMap.get(terminal)?.renaming === true;
   }
 
   /**
