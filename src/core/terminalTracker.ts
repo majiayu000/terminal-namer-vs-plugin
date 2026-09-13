@@ -28,7 +28,13 @@ export type AutoRenameResult =
 /** Cooldown after provider/config failure before auto-rename may retry. */
 const AUTO_RENAME_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
-const PROVIDER_CONFIG_KEYS = [
+/**
+ * Settings that affect generated name content or provider requests.
+ * Changes bump `providerConfigGeneration` so in-flight results are discarded.
+ * `autoRename` is intentionally excluded — toggling it must not cancel a
+ * paid in-flight manual rename that does not depend on that flag.
+ */
+const PROVIDER_CONTENT_CONFIG_KEYS = [
   'terminalAiNamer.provider',
   'terminalAiNamer.openrouterApiKey',
   'terminalAiNamer.openrouterModel',
@@ -36,7 +42,6 @@ const PROVIDER_CONFIG_KEYS = [
   'terminalAiNamer.claudeApiKey',
   'terminalAiNamer.ollamaEndpoint',
   'terminalAiNamer.ollamaModel',
-  'terminalAiNamer.autoRename',
   'terminalAiNamer.language'
 ] as const;
 
@@ -136,11 +141,16 @@ export class TerminalTracker {
         if (e.affectsConfiguration('terminalAiNamer.commandThreshold')) {
           this.commandThreshold = this.getCommandThreshold();
         }
-        // Re-enable auto-rename after the user fixes provider settings (or
-        // toggles related options). Without this, a failed key/endpoint leaves
-        // terminals blocked even after configuration is corrected.
-        if (PROVIDER_CONFIG_KEYS.some((key) => e.affectsConfiguration(key))) {
+        // Re-enable auto-rename after the user fixes provider settings.
+        // Content-affecting keys also bump generation so stale in-flight
+        // generateName results are discarded. autoRename alone only clears
+        // cooldown/pending — it must not cancel paid manual rename results.
+        if (
+          PROVIDER_CONTENT_CONFIG_KEYS.some((key) => e.affectsConfiguration(key))
+        ) {
           this.providerConfigGeneration += 1;
+          this.clearAutoRenameBlocks();
+        } else if (e.affectsConfiguration('terminalAiNamer.autoRename')) {
           this.clearAutoRenameBlocks();
         }
       })
@@ -284,10 +294,12 @@ export class TerminalTracker {
   }
 
   setPendingName(terminal: vscode.Terminal, name: string) {
-    let data = this.terminalDataMap.get(terminal);
+    // Do not recreate map entries for closed terminals. onDidCloseTerminal
+    // already removed the key; recreating would leak Terminal objects and
+    // pending state for the rest of the session with no future close event.
+    const data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = freshTerminalData();
-      this.terminalDataMap.set(terminal, data);
+      return;
     }
     data.pendingName = name;
   }

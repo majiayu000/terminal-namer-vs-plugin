@@ -534,8 +534,12 @@ async function restoreCollateralRenames(
  */
 async function renameTerminalSafely(
   terminal: vscode.Terminal,
-  name: string
+  name: string,
+  options?: { isStillValid?: () => boolean }
 ): Promise<boolean> {
+  const isStillValid = (): boolean =>
+    options?.isStillValid === undefined || options.isStillValid();
+
   return withRenameLock(async () => {
     // Already has the intended title — skip focus/dispatch entirely so an
     // idempotent retry cannot rename a collateral terminal mid-dispatch and
@@ -545,9 +549,19 @@ async function renameTerminalSafely(
     }
 
     for (let attempt = 1; attempt <= RENAME_FOCUS_MAX_ATTEMPTS; attempt++) {
+      // Provider/language may change while we wait for focus across attempts.
+      if (!isStillValid()) {
+        return false;
+      }
+
       const focused = await waitForTerminalFocus(terminal, RENAME_FOCUS_TIMEOUT_MS);
       if (!focused || vscode.window.activeTerminal !== terminal) {
         continue;
+      }
+
+      // Recheck after the async focus wait before treating rename as viable.
+      if (!isStillValid()) {
+        return false;
       }
 
       // Snapshot titles so a mid-dispatch focus steal can be rolled back.
@@ -565,6 +579,10 @@ async function renameTerminalSafely(
       // Final pre-dispatch snapshot — still best-effort under API limits.
       if (vscode.window.activeTerminal !== terminal) {
         continue;
+      }
+
+      if (!isStillValid()) {
+        return false;
       }
 
       await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', {
@@ -672,16 +690,23 @@ async function renameTerminalWithAI(
           name = result.name;
         }
 
-        // After AI generation: serialize rename + re-check focus before renameWithArg
-        const renamed = await renameTerminalSafely(terminal, name);
+        // After AI generation: serialize rename + re-check focus before renameWithArg.
+        // Pass generation guard so a mid-focus settings change aborts before dispatch.
+        const renamed = await renameTerminalSafely(terminal, name, {
+          isStillValid: isProviderConfigCurrent
+        });
+
+        // Recheck after the focus/rename interval: a stale successful dispatch
+        // must not mark the terminal named and block a corrected-settings retry.
+        if (!isProviderConfigCurrent()) {
+          tracker?.clearPendingName(terminal);
+          outcome = 'skipped';
+          return;
+        }
+
         if (!renamed) {
-          // Retain the generated name for the next auto-rename attempt only when
-          // the provider config that produced it is still current.
-          if (isProviderConfigCurrent()) {
-            tracker?.setPendingName(terminal, name);
-          } else {
-            tracker?.clearPendingName(terminal);
-          }
+          // Retain the generated name for the next auto-rename attempt.
+          tracker?.setPendingName(terminal, name);
           // Do not resetNamed here: auto-rename already keys off the outcome,
           // and clearing named would erase a prior successful manual/auto name
           // after a failed focus-held rename attempt.
