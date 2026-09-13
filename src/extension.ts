@@ -264,6 +264,9 @@ async function renameTerminalWithAI(terminal: vscode.Terminal, commands: string[
       }
     );
   } catch (error) {
+    // Leave named=false and clear in-flight so a later command can auto-retry.
+    tracker?.clearInFlight(terminal);
+    tracker?.resetNamed(terminal);
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
   }

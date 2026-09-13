@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 interface TerminalData {
   commands: string[];
   named: boolean;
+  /** True while an async auto-rename request is outstanding. */
+  renaming: boolean;
 }
 
 /**
@@ -32,7 +34,7 @@ export class TerminalTracker {
     // 监听终端创建
     this.disposables.push(
       vscode.window.onDidOpenTerminal((terminal) => {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, { commands: [], named: false, renaming: false });
       })
     );
 
@@ -61,7 +63,7 @@ export class TerminalTracker {
     // 初始化已存在的终端
     vscode.window.terminals.forEach((terminal) => {
       if (!this.terminalDataMap.has(terminal)) {
-        this.terminalDataMap.set(terminal, { commands: [], named: false });
+        this.terminalDataMap.set(terminal, { commands: [], named: false, renaming: false });
       }
     });
 
@@ -91,7 +93,7 @@ export class TerminalTracker {
 
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = { commands: [], named: false, renaming: false };
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -103,14 +105,20 @@ export class TerminalTracker {
       data.commands = data.commands.slice(-10);
     }
 
-    // 检查是否达到阈值且未命名
+    // 检查是否达到阈值且未命名 / 未在重命名中
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const autoRename = config.get<boolean>('autoRename', true);
 
-    if (autoRename && !data.named && data.commands.length >= this.commandThreshold) {
-      // 触发命名回调
+    if (
+      autoRename &&
+      !data.named &&
+      !data.renaming &&
+      data.commands.length >= this.commandThreshold
+    ) {
+      // Mark in-flight so concurrent threshold events do not spawn duplicate AI calls.
+      // named stays false until renameTerminalWithAI succeeds.
+      data.renaming = true;
       this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold));
-      data.named = true;
     }
   }
 
@@ -120,7 +128,7 @@ export class TerminalTracker {
   addCommand(terminal: vscode.Terminal, command: string) {
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false };
+      data = { commands: [], named: false, renaming: false };
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -145,6 +153,17 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = false;
+      data.renaming = false;
+    }
+  }
+
+  /**
+   * Clear in-flight rename state so a later command can retry auto-rename.
+   */
+  clearInFlight(terminal: vscode.Terminal) {
+    const data = this.terminalDataMap.get(terminal);
+    if (data) {
+      data.renaming = false;
     }
   }
 
@@ -155,6 +174,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = true;
+      data.renaming = false;
     }
   }
 
