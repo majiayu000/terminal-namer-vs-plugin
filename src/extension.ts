@@ -593,37 +593,48 @@ async function renameTerminalWithAI(
         cancellable: false
       },
       async () => {
-        const result = await provider.generateName({ commands, language, cwd });
+        // Reuse a name already paid for on a prior focus-skip so every subsequent
+        // shell command does not re-call generateName while focus keeps failing.
+        const pendingName = tracker?.getPendingName(terminal);
+        let name: string;
+        if (pendingName) {
+          name = pendingName;
+        } else {
+          const result = await provider.generateName({ commands, language, cwd });
 
-        // 记录使用量
-        if (result.usage && usageTracker) {
-          usageTracker.recordUsage(
-            result.model,
-            result.usage.promptTokens,
-            result.usage.completionTokens
-          );
+          // 记录使用量
+          if (result.usage && usageTracker) {
+            usageTracker.recordUsage(
+              result.model,
+              result.usage.promptTokens,
+              result.usage.completionTokens
+            );
+          }
+          name = result.name;
         }
 
         // After AI generation: serialize rename + re-check focus before renameWithArg
-        const renamed = await renameTerminalSafely(terminal, result.name);
+        const renamed = await renameTerminalSafely(terminal, name);
         if (!renamed) {
+          // Retain the generated name for the next auto-rename attempt.
+          tracker?.setPendingName(terminal, name);
           // Do not resetNamed here: auto-rename already keys off the outcome,
           // and clearing named would erase a prior successful manual/auto name
           // after a failed focus-held rename attempt.
           vscode.window.showWarningMessage(
-            `无法聚焦目标终端，已跳过命名（生成名称: ${result.name}）`
+            `无法聚焦目标终端，已跳过命名（生成名称: ${name}）`
           );
           outcome = 'skipped';
           return;
         }
 
-        // 标记为已命名
+        // 标记为已命名 (also clears pendingName)
         tracker?.markAsNamed(terminal);
 
         // 刷新侧边栏
         terminalTreeProvider?.refresh();
 
-        vscode.window.showInformationMessage(`终端已命名为: ${result.name}`);
+        vscode.window.showInformationMessage(`终端已命名为: ${name}`);
         outcome = 'renamed';
       }
     );
@@ -633,6 +644,8 @@ async function renameTerminalWithAI(
     // Provider/config failures (bad API key, quota, unreachable endpoint) are
     // not focus skips — return `failed` so auto-rename does not re-arm on every
     // shell command. Preserve prior named=true for already-named terminals.
+    // Drop any pending name; a failed generation should not be reused.
+    tracker?.clearPendingName(terminal);
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
     return 'failed';
