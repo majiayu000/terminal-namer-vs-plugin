@@ -16,8 +16,18 @@ const LEGACY_CONFIG_KEYS: Record<ApiKeyProvider, string> = {
   claude: 'claudeApiKey'
 };
 
+const LEGACY_SCOPES: vscode.ConfigurationTarget[] = [
+  vscode.ConfigurationTarget.Global,
+  vscode.ConfigurationTarget.Workspace,
+  vscode.ConfigurationTarget.WorkspaceFolder
+];
+
 export function isApiKeyProvider(provider: string): provider is ApiKeyProvider {
   return provider === 'openrouter' || provider === 'openai' || provider === 'claude';
+}
+
+export function getLegacyConfigKeys(): string[] {
+  return Object.values(LEGACY_CONFIG_KEYS);
 }
 
 export async function getApiKey(
@@ -51,9 +61,51 @@ export async function hasApiKey(
   return !!value;
 }
 
+function readScopedString(
+  inspect: {
+    globalValue?: string;
+    workspaceValue?: string;
+    workspaceFolderValue?: string;
+  },
+  target: vscode.ConfigurationTarget
+): string | undefined {
+  switch (target) {
+    case vscode.ConfigurationTarget.Global:
+      return inspect.globalValue;
+    case vscode.ConfigurationTarget.Workspace:
+      return inspect.workspaceValue;
+    case vscode.ConfigurationTarget.WorkspaceFolder:
+      return inspect.workspaceFolderValue;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Clear a legacy plaintext API key from every configuration scope that still
+ * holds a non-empty value (global, workspace, and workspace-folder).
+ */
+async function clearLegacyKeyAllScopes(
+  config: vscode.WorkspaceConfiguration,
+  legacyKey: string
+): Promise<void> {
+  const inspected = config.inspect<string>(legacyKey);
+  if (!inspected) {
+    return;
+  }
+
+  for (const target of LEGACY_SCOPES) {
+    const scoped = readScopedString(inspected, target);
+    if (typeof scoped === 'string' && scoped.length > 0) {
+      await config.update(legacyKey, undefined, target);
+    }
+  }
+}
+
 /**
  * One-time migration: copy plaintext API keys from workspace settings into
- * SecretStorage, then clear the settings values.
+ * SecretStorage, then clear the settings values at every populated scope.
+ * Also clears leftover plaintext even when SecretStorage already has a key.
  */
 export async function migrateApiKeysFromSettings(
   secrets: vscode.SecretStorage
@@ -62,18 +114,26 @@ export async function migrateApiKeysFromSettings(
   const providers: ApiKeyProvider[] = ['openrouter', 'openai', 'claude'];
 
   for (const provider of providers) {
-    const existing = await getApiKey(secrets, provider);
-    if (existing) {
-      continue;
-    }
-
     const legacyKey = LEGACY_CONFIG_KEYS[provider];
-    const legacyValue = config.get<string>(legacyKey, '');
-    if (!legacyValue) {
+    const inspected = config.inspect<string>(legacyKey);
+    const scopedValues = [
+      inspected?.globalValue,
+      inspected?.workspaceValue,
+      inspected?.workspaceFolderValue
+    ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+    if (scopedValues.length === 0) {
       continue;
     }
 
-    await setApiKey(secrets, provider, legacyValue);
-    await config.update(legacyKey, '', vscode.ConfigurationTarget.Global);
+    const existing = await getApiKey(secrets, provider);
+    if (!existing) {
+      // Prefer the most specific scope (folder > workspace > global).
+      const legacyValue =
+        scopedValues[scopedValues.length - 1] ?? scopedValues[0];
+      await setApiKey(secrets, provider, legacyValue);
+    }
+
+    await clearLegacyKeyAllScopes(config, legacyKey);
   }
 }

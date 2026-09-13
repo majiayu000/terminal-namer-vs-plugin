@@ -21,7 +21,9 @@ export async function createProvider(
     case 'openai': {
       const apiKey = await getApiKey(secrets, 'openai');
       if (!apiKey) {
-        throw new Error('请先配置 OpenAI API Key（侧边栏快捷设置）');
+        throw new Error(
+          '请先在侧边栏「快捷设置」中配置 OpenAI API Key（SecretStorage）'
+        );
       }
       return new OpenAIProvider(apiKey);
     }
@@ -29,7 +31,9 @@ export async function createProvider(
     case 'claude': {
       const apiKey = await getApiKey(secrets, 'claude');
       if (!apiKey) {
-        throw new Error('请先配置 Claude API Key（侧边栏快捷设置）');
+        throw new Error(
+          '请先在侧边栏「快捷设置」中配置 Claude API Key（SecretStorage）'
+        );
       }
       return new ClaudeProvider(apiKey);
     }
@@ -43,7 +47,9 @@ export async function createProvider(
     case 'openrouter': {
       const apiKey = await getApiKey(secrets, 'openrouter');
       if (!apiKey) {
-        throw new Error('请先配置 OpenRouter API Key（侧边栏快捷设置）');
+        throw new Error(
+          '请先在侧边栏「快捷设置」中配置 OpenRouter API Key（SecretStorage）'
+        );
       }
       const model = config.get<string>('openrouterModel', 'google/gemini-2.5-flash');
       return new OpenRouterProvider(apiKey, model);

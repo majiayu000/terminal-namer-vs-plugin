@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import { TerminalTracker, UsageTracker } from './core';
 import { createProvider } from './providers';
-import { migrateApiKeysFromSettings } from './secrets/apiKeys';
+import {
+  getLegacyConfigKeys,
+  migrateApiKeysFromSettings
+} from './secrets/apiKeys';
 import { TerminalTreeProvider, TerminalItem, SettingsSidebarProvider } from './views';
 
 let tracker: TerminalTracker | undefined;
@@ -10,14 +13,28 @@ let usageTracker: UsageTracker | undefined;
 let settingsSidebarProvider: SettingsSidebarProvider | undefined;
 let extensionSecrets: vscode.SecretStorage | undefined;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   console.log('=== Terminal AI Namer 正在激活 ===');
 
   try {
     extensionSecrets = context.secrets;
 
-    // Migrate any plaintext API keys from settings into SecretStorage.
-    void migrateApiKeysFromSettings(context.secrets);
+    // Migrate plaintext API keys before any SecretStorage consumers register.
+    await migrateApiKeysFromSettings(context.secrets);
+
+    // If a user later sets a deprecated plaintext key in settings, migrate it.
+    const legacyKeys = new Set(
+      getLegacyConfigKeys().map((key) => `terminalAiNamer.${key}`)
+    );
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(async (event) => {
+        if (![...legacyKeys].some((key) => event.affectsConfiguration(key))) {
+          return;
+        }
+        await migrateApiKeysFromSettings(context.secrets);
+        settingsSidebarProvider?.refreshSettings();
+      })
+    );
 
     // 初始化使用量追踪器
     usageTracker = new UsageTracker(context);

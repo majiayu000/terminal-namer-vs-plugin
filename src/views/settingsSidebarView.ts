@@ -92,6 +92,12 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Re-push current settings after SecretStorage migration completes. */
+  public refreshSettings() {
+    void this._sendCurrentSettings();
+    this.updateStats();
+  }
+
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
@@ -140,7 +146,8 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     let providerForKey: ProviderType | undefined;
 
     for (const [key, value] of Object.entries(settings)) {
-      if (!(key in SETTING_VALIDATORS)) {
+      // Reject inherited Object keys (constructor, __proto__, etc.).
+      if (!Object.prototype.hasOwnProperty.call(SETTING_VALIDATORS, key)) {
         rejected.push(key);
         continue;
       }
@@ -441,12 +448,27 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     let apiKeyConfigured = false;
     let clearRequested = false;
 
-    function onProviderChange() {
+    function syncProviderUi() {
       const provider = document.getElementById('provider').value;
       const modelGroup = document.getElementById('modelGroup');
       const apiKeyGroup = document.getElementById('apiKeyGroup');
       modelGroup.classList.toggle('hidden', provider !== 'openrouter');
       apiKeyGroup.classList.toggle('hidden', provider === 'ollama');
+    }
+
+    function onProviderChange() {
+      syncProviderUi();
+      // Pending clear/replace must not apply to a different provider.
+      clearRequested = false;
+      document.getElementById('apiKey').value = '';
+      apiKeyConfigured = false;
+      updateApiKeyUi();
+      const provider = document.getElementById('provider').value;
+      if (provider !== 'ollama') {
+        updateStatus(false);
+      } else {
+        document.getElementById('status').classList.add('hidden');
+      }
     }
 
     function updateApiKeyUi() {
@@ -559,7 +581,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         } else {
           document.getElementById('status').classList.add('hidden');
         }
-        onProviderChange();
+        syncProviderUi();
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);
       }
