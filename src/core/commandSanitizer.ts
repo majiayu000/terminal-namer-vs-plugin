@@ -12,15 +12,16 @@ export interface SanitizeOptions {
 
 const DEFAULT_MAX_LENGTH = 120;
 
-/**
- * Assignment-style secrets: TOKEN=..., KEY=..., PASSWORD=..., including quoted
- * values that may contain whitespace (e.g. export API_KEY="correct horse").
- */
-const ENV_ASSIGNMENT =
-  /\b(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/g;
-
 const SECRET_ENV_NAME =
   /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|BEARER|AUTH|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|(?:^|_)KEY(?:_|$))/i;
+
+/** True when `i` can start a shell assignment (start of string or non-identifier). */
+function canStartAssignment(s: string, i: number): boolean {
+  if (i === 0) {
+    return true;
+  }
+  return !/[A-Za-z0-9_]/.test(s[i - 1]!);
+}
 
 /** Authorization / Bearer / Basic headers */
 const AUTH_HEADER =
@@ -116,42 +117,84 @@ function skipBacktick(s: string, i: number): number {
 }
 
 /**
- * Advance past one shell assignment value (quoted, bare, or with $()/`` substitutions).
+ * Advance past one shell word: quoted segments (with internal whitespace),
+ * concatenations such as `correct" horse battery"`, escapes (`a\ b`), and
+ * `$()` / `` ` `` substitutions. Unquoted whitespace ends the word.
  */
-function skipAssignmentValue(s: string, i: number): number {
-  if (s[i] === '"' || s[i] === "'") {
-    const q = s[i]!;
-    i++;
-    while (i < s.length && s[i] !== q) {
-      if (s[i] === '\\' && i + 1 < s.length) {
-        i += 2;
-      } else {
-        i++;
-      }
-    }
-    if (i < s.length) {
-      i++; // closing quote
-    }
+function skipShellWord(s: string, i: number): number {
+  if (i >= s.length || /\s/.test(s[i]!)) {
     return i;
   }
 
-  // Unquoted value: consume until whitespace, treating $()/`` as atomic.
-  while (i < s.length && !/\s/.test(s[i]!)) {
-    if (s[i] === '$' && s[i + 1] === '(') {
+  while (i < s.length) {
+    const c = s[i]!;
+
+    // Unquoted whitespace terminates the word
+    if (/\s/.test(c)) {
+      break;
+    }
+
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      while (i < s.length && s[i] !== q) {
+        // Inside double quotes, backslash escapes the next character.
+        // Inside single quotes, backslash is literal (bash).
+        if (s[i] === '\\' && q === '"' && i + 1 < s.length) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i < s.length) {
+        i++; // closing quote
+      }
+      continue;
+    }
+
+    if (c === '$' && s[i + 1] === '(') {
       i = skipDollarParen(s, i);
       continue;
     }
-    if (s[i] === '`') {
+    if (c === '`') {
       i = skipBacktick(s, i);
       continue;
     }
-    if (s[i] === '\\' && i + 1 < s.length) {
+    if (c === '\\' && i + 1 < s.length) {
       i += 2;
       continue;
     }
     i++;
   }
   return i;
+}
+
+/**
+ * Redact secret env assignments, consuming complete shell words as values
+ * (quoted, concatenated, escaped, or with substitutions).
+ */
+function redactEnvAssignments(command: string): string {
+  let result = '';
+  let i = 0;
+  const s = command;
+
+  while (i < s.length) {
+    if (canStartAssignment(s, i)) {
+      const rest = s.slice(i);
+      const m = rest.match(/^(export\s+)?([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)/);
+      if (m && SECRET_ENV_NAME.test(m[2]!)) {
+        const valueStart = i + m[0].length;
+        const valueEnd = skipShellWord(s, valueStart);
+        const exportPrefix = m[1] ?? '';
+        result += `${exportPrefix}${m[2]}=${REDACTED}`;
+        i = valueEnd;
+        continue;
+      }
+    }
+    result += s[i];
+    i++;
+  }
+  return result;
 }
 
 /**
@@ -170,7 +213,7 @@ function skipLeadingAssignments(command: string): string {
       break;
     }
     i += m[0].length;
-    i = skipAssignmentValue(s, i);
+    i = skipShellWord(s, i);
   }
   return s.slice(i).trimStart();
 }
@@ -216,7 +259,8 @@ function redactHighEntropy(command: string): string {
 }
 
 /**
- * Consume a flag value that may be quoted (including whitespace inside quotes).
+ * Consume a flag value that may be quoted, concatenated, or escaped
+ * (e.g. `--password correct\ horse` or `--password "a b"`).
  * Returns the index just past the value.
  */
 function skipFlagValue(s: string, i: number): number {
@@ -226,13 +270,7 @@ function skipFlagValue(s: string, i: number): number {
   if (i >= s.length) {
     return i;
   }
-  if (s[i] === '"' || s[i] === "'") {
-    return skipAssignmentValue(s, i);
-  }
-  while (i < s.length && !/\s/.test(s[i]!)) {
-    i++;
-  }
-  return i;
+  return skipShellWord(s, i);
 }
 
 /**
@@ -321,18 +359,7 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
     return '';
   }
 
-  result = result.replace(
-    ENV_ASSIGNMENT,
-    (full, name: string, singleQuoted?: string, doubleQuoted?: string, bare?: string) => {
-      if (!SECRET_ENV_NAME.test(name)) {
-        return full;
-      }
-      const exportPrefix = full.match(/^export\s+/i)?.[0] ?? '';
-      const quote =
-        singleQuoted !== undefined ? "'" : doubleQuoted !== undefined ? '"' : '';
-      return `${exportPrefix}${name}=${quote}${REDACTED}${quote}`;
-    }
-  );
+  result = redactEnvAssignments(result);
 
   result = result.replace(AUTH_HEADER, (m) => {
     const sep = m.search(/[:=]/);

@@ -45,6 +45,12 @@ console.log('commandSanitizer');
   assertIncludes(out, '[REDACTED]', 'redacts quoted API_KEY with spaces');
   assertNotIncludes(out, 'correct horse', 'removes passphrase words');
   assertIncludes(out, 'npm test', 'keeps remaining command after quoted assignment');
+
+  const compound = sanitizeCommand('API_KEY=correct" horse battery" npm test');
+  assertIncludes(compound, '[REDACTED]', 'redacts compound quoted API_KEY assignment');
+  assertNotIncludes(compound, 'horse', 'removes compound quoted fragments');
+  assertNotIncludes(compound, 'battery', 'removes compound quoted tail');
+  assertIncludes(compound, 'npm test', 'keeps command after compound assignment');
 }
 
 {
@@ -80,6 +86,11 @@ console.log('commandSanitizer');
   assertIncludes(quotedPassphrase, '[REDACTED]', 'redacts quoted passphrase flag value');
   assertNotIncludes(quotedPassphrase, 'correct horse', 'removes quoted passphrase words');
   assertIncludes(quotedPassphrase, 'run', 'keeps trailing args after quoted flag');
+
+  const escapedWs = sanitizeCommand('tool --password correct\\ horse run');
+  assertIncludes(escapedWs, '[REDACTED]', 'redacts escaped-whitespace password flag');
+  assertNotIncludes(escapedWs, 'horse', 'removes escaped password fragment');
+  assertIncludes(escapedWs, 'run', 'keeps trailing args after escaped flag value');
 }
 
 {
@@ -165,6 +176,14 @@ console.log('commandSanitizer');
   assert(
     extractArgv0("TOKEN=`printf secret` npm test") === 'npm',
     'extractArgv0 skips backtick substitution assignment'
+  );
+  assert(
+    extractArgv0('TOKEN=correct" horse battery" npm test') === 'npm',
+    'extractArgv0 skips compound quoted assignment'
+  );
+  assert(
+    sanitizeCommand('TOKEN=correct" horse battery" npm test', { argv0Only: true }) === 'npm',
+    'argv0Only does not leak compound quoted assignment fragments'
   );
 }
 
