@@ -16,6 +16,13 @@ const LEGACY_CONFIG_KEYS: Record<ApiKeyProvider, string> = {
   claude: 'claudeApiKey'
 };
 
+/**
+ * Marker stored in SecretStorage when a scope is explicitly cleared / disabled.
+ * Distinguished from a missing key so migration does not restore leftover
+ * plaintext, and so empty scoped overrides can block fallthrough to global.
+ */
+const CLEARED_MARKER = '__terminalAiNamer.cleared__';
+
 export function isApiKeyProvider(provider: string): provider is ApiKeyProvider {
   return provider === 'openrouter' || provider === 'openai' || provider === 'claude';
 }
@@ -34,6 +41,19 @@ function workspaceSecretKey(provider: ApiKeyProvider, workspaceId: string): stri
 
 function folderSecretKey(provider: ApiKeyProvider, folderUri: string): string {
   return `${SECRET_KEYS[provider]}.folder.${folderUri}`;
+}
+
+/** Tracks plaintext that was migrated but not successfully cleared from settings. */
+function remnantKey(secretKey: string): string {
+  return `${secretKey}.migratedRemnant`;
+}
+
+function isClearedMarker(value: string | undefined): boolean {
+  return value === CLEARED_MARKER;
+}
+
+function isUsableSecret(value: string | undefined): value is string {
+  return typeof value === 'string' && value.length > 0 && !isClearedMarker(value);
 }
 
 /**
@@ -70,10 +90,11 @@ function foldersWorkspaceId(): string | undefined {
 }
 
 /**
- * Read a workspace-scoped secret, relocating any folders:-keyed value onto the
- * current file:-based id when the workspace file is present.
+ * Read a workspace-scoped secret (including cleared markers), relocating any
+ * folders:-keyed value onto the current file:-based id when needed while
+ * retaining the folders: alias for future workspace-file renames.
  */
-async function getWorkspaceScopedSecret(
+async function getWorkspaceScopedSecretRaw(
   secrets: vscode.SecretStorage,
   provider: ApiKeyProvider
 ): Promise<string | undefined> {
@@ -84,12 +105,12 @@ async function getWorkspaceScopedSecret(
 
   const primaryKey = workspaceSecretKey(provider, workspaceId);
   const primaryValue = await secrets.get(primaryKey);
-  if (primaryValue) {
+  if (primaryValue !== undefined) {
     return primaryValue;
   }
 
-  // Relocate folders:-keyed secrets after a workspace-file rename or upgrade
-  // from the prior folders-only id scheme.
+  // Fall back to folders:-keyed alias after a workspace-file rename/move/save,
+  // or when upgrading from the prior folders-only id scheme.
   const foldersId = foldersWorkspaceId();
   if (!foldersId || foldersId === workspaceId) {
     return undefined;
@@ -97,13 +118,47 @@ async function getWorkspaceScopedSecret(
 
   const foldersKey = workspaceSecretKey(provider, foldersId);
   const foldersValue = await secrets.get(foldersKey);
-  if (!foldersValue) {
+  if (foldersValue === undefined) {
     return undefined;
   }
 
+  // Copy onto the current file: primary key but keep the folders: alias so a
+  // later rename of the .code-workspace file can still resolve the secret.
   await secrets.store(primaryKey, foldersValue);
-  await secrets.delete(foldersKey);
   return foldersValue;
+}
+
+/**
+ * Persist a workspace-scoped value under the current primary id and, when a
+ * distinct folder-set id exists, under the stable folders: alias as well.
+ */
+async function storeWorkspaceScopedSecret(
+  secrets: vscode.SecretStorage,
+  provider: ApiKeyProvider,
+  value: string,
+  replaceExisting: boolean
+): Promise<void> {
+  const workspaceId = currentWorkspaceId();
+  if (!workspaceId) {
+    return;
+  }
+
+  await storeMigratedSecret(
+    secrets,
+    workspaceSecretKey(provider, workspaceId),
+    value,
+    replaceExisting
+  );
+
+  const foldersId = foldersWorkspaceId();
+  if (foldersId && foldersId !== workspaceId) {
+    await storeMigratedSecret(
+      secrets,
+      workspaceSecretKey(provider, foldersId),
+      value,
+      replaceExisting
+    );
+  }
 }
 
 /** Delete every known workspace-scoped secret id for this provider. */
@@ -111,17 +166,21 @@ async function clearWorkspaceScopedSecrets(
   secrets: vscode.SecretStorage,
   provider: ApiKeyProvider
 ): Promise<void> {
-  // Relocate folders: → file: first so the primary id is what we delete.
-  await getWorkspaceScopedSecret(secrets, provider);
+  // Ensure file: primary exists from folders: alias before deleting both.
+  await getWorkspaceScopedSecretRaw(secrets, provider);
 
   const workspaceId = currentWorkspaceId();
   if (workspaceId) {
-    await secrets.delete(workspaceSecretKey(provider, workspaceId));
+    const key = workspaceSecretKey(provider, workspaceId);
+    await secrets.delete(key);
+    await secrets.delete(remnantKey(key));
   }
 
   const foldersId = foldersWorkspaceId();
   if (foldersId && foldersId !== workspaceId) {
-    await secrets.delete(workspaceSecretKey(provider, foldersId));
+    const key = workspaceSecretKey(provider, foldersId);
+    await secrets.delete(key);
+    await secrets.delete(remnantKey(key));
   }
 }
 
@@ -133,7 +192,9 @@ async function storeMigratedSecret(
 ): Promise<void> {
   if (!replaceExisting) {
     const existing = await secrets.get(key);
-    if (existing) {
+    // Treat any stored value (including cleared markers) as present so leftover
+    // plaintext cannot resurrect a cleared credential.
+    if (existing !== undefined) {
       return;
     }
   }
@@ -141,8 +202,44 @@ async function storeMigratedSecret(
 }
 
 /**
+ * Migrate a plaintext setting into SecretStorage, skipping re-application when
+ * the same plaintext was already migrated but cleanup previously failed (the
+ * remnant marker). Always retries cleanup; clears the remnant on success.
+ */
+async function migrateScopeValue(
+  secrets: vscode.SecretStorage,
+  secretKey: string,
+  plaintext: string,
+  replaceExisting: boolean,
+  store: (replace: boolean) => Promise<void>,
+  cleanup: () => Promise<string | undefined>
+): Promise<string | undefined> {
+  const remnant = await secrets.get(remnantKey(secretKey));
+  const alreadyMigratedRemnant = remnant === plaintext;
+
+  if (!alreadyMigratedRemnant) {
+    await store(replaceExisting);
+  }
+
+  const failure = await cleanup();
+  if (failure) {
+    // Remember this plaintext so a later activation does not recreate a scoped
+    // secret the user already replaced/cleared via the sidebar while the
+    // read-only settings file still holds the old value.
+    await secrets.store(remnantKey(secretKey), plaintext);
+    return failure;
+  }
+
+  await secrets.delete(remnantKey(secretKey));
+  return undefined;
+}
+
+/**
  * Resolve API key with VS Code-like precedence:
  * matching workspace-folder (when resource given) > workspace > global/legacy.
+ *
+ * Cleared markers at a more-specific scope block fallthrough (explicit empty
+ * overrides and sidebar clears).
  *
  * When no resource is provided (unknown terminal cwd / no Shell Integration),
  * folder-scoped credentials are skipped so we never silently pick an unrelated
@@ -160,19 +257,28 @@ export async function getApiKey(
       const folderValue = await secrets.get(
         folderSecretKey(provider, matchingFolder.uri.toString())
       );
-      if (folderValue) {
+      if (isClearedMarker(folderValue)) {
+        return undefined;
+      }
+      if (isUsableSecret(folderValue)) {
         return folderValue;
       }
     }
   }
 
-  const workspaceValue = await getWorkspaceScopedSecret(secrets, provider);
-  if (workspaceValue) {
+  const workspaceValue = await getWorkspaceScopedSecretRaw(secrets, provider);
+  if (isClearedMarker(workspaceValue)) {
+    return undefined;
+  }
+  if (isUsableSecret(workspaceValue)) {
     return workspaceValue;
   }
 
   const globalValue = await secrets.get(globalSecretKey(provider));
-  return globalValue || undefined;
+  if (isClearedMarker(globalValue) || !isUsableSecret(globalValue)) {
+    return undefined;
+  }
+  return globalValue;
 }
 
 /**
@@ -185,6 +291,7 @@ export async function setApiKey(
   apiKey: string
 ): Promise<void> {
   await secrets.store(globalSecretKey(provider), apiKey);
+  await secrets.delete(remnantKey(globalSecretKey(provider)));
 
   // Clear more-specific overrides so the saved global value is what getApiKey
   // resolves for this window.
@@ -193,7 +300,9 @@ export async function setApiKey(
   const folders = vscode.workspace.workspaceFolders;
   if (folders) {
     for (const folder of folders) {
-      await secrets.delete(folderSecretKey(provider, folder.uri.toString()));
+      const key = folderSecretKey(provider, folder.uri.toString());
+      await secrets.delete(key);
+      await secrets.delete(remnantKey(key));
     }
   }
 }
@@ -201,8 +310,8 @@ export async function setApiKey(
 /**
  * Clear every credential the unscoped sidebar control represents for this
  * provider (all folder overrides in the window, workspace scope, and global).
- * The settings UI has no terminal/resource scope, so clearing only the first
- * folder key would leave other folder credentials configured.
+ * Global uses an explicit cleared marker so leftover synced plaintext settings
+ * cannot rematerialize the key on the next activation.
  */
 export async function clearApiKey(
   secrets: vscode.SecretStorage,
@@ -211,12 +320,18 @@ export async function clearApiKey(
   const folders = vscode.workspace.workspaceFolders;
   if (folders) {
     for (const folder of folders) {
-      await secrets.delete(folderSecretKey(provider, folder.uri.toString()));
+      const key = folderSecretKey(provider, folder.uri.toString());
+      await secrets.delete(key);
+      await secrets.delete(remnantKey(key));
     }
   }
 
   await clearWorkspaceScopedSecrets(secrets, provider);
-  await secrets.delete(globalSecretKey(provider));
+
+  // Tombstone rather than delete: migration leaves Global plaintext in place for
+  // Settings Sync, and must not restore a key the user explicitly cleared.
+  await secrets.store(globalSecretKey(provider), CLEARED_MARKER);
+  await secrets.delete(remnantKey(globalSecretKey(provider)));
 }
 
 export async function hasApiKey(
@@ -226,17 +341,26 @@ export async function hasApiKey(
   const folders = vscode.workspace.workspaceFolders;
   if (folders) {
     for (const folder of folders) {
-      if (await secrets.get(folderSecretKey(provider, folder.uri.toString()))) {
+      const folderValue = await secrets.get(
+        folderSecretKey(provider, folder.uri.toString())
+      );
+      if (isUsableSecret(folderValue)) {
         return true;
       }
     }
   }
 
-  if (await getWorkspaceScopedSecret(secrets, provider)) {
+  const workspaceValue = await getWorkspaceScopedSecretRaw(secrets, provider);
+  if (isClearedMarker(workspaceValue)) {
+    // Explicit workspace disable — treat as unconfigured for this window.
+    return false;
+  }
+  if (isUsableSecret(workspaceValue)) {
     return true;
   }
 
-  return !!(await secrets.get(globalSecretKey(provider)));
+  const globalValue = await secrets.get(globalSecretKey(provider));
+  return isUsableSecret(globalValue);
 }
 
 async function clearLegacyScope(
@@ -275,6 +399,9 @@ export interface MigrateApiKeysResult {
  * SecretStorage key, then clear only that scope. Multi-root folders are
  * inspected with a resource-scoped configuration.
  *
+ * Explicit empty strings at workspace/folder scope are stored as cleared
+ * markers so they continue to disable more-general credentials.
+ *
  * @param replaceExisting When true, overwrite existing SecretStorage values
  *   (activation and live deprecated-setting edits). Use this whenever a
  *   plaintext value is present so offline replacements are not discarded.
@@ -290,7 +417,7 @@ export async function migrateApiKeysFromSettings(
 
   for (const provider of providers) {
     // Relocate folders:-keyed workspace secrets onto the current id first.
-    await getWorkspaceScopedSecret(secrets, provider);
+    await getWorkspaceScopedSecretRaw(secrets, provider);
 
     const legacyKey = LEGACY_CONFIG_KEYS[provider];
     const inspected = rootConfig.inspect<string>(legacyKey);
@@ -298,7 +425,7 @@ export async function migrateApiKeysFromSettings(
     const globalValue = inspected?.globalValue;
     if (typeof globalValue === 'string' && globalValue.length > 0) {
       // Store-if-absent only: leftover synced Global plaintext must not clobber
-      // a newer SecretStorage value set via the sidebar on this machine.
+      // a newer SecretStorage value (or cleared marker) set via the sidebar.
       await storeMigratedSecret(
         secrets,
         globalSecretKey(provider),
@@ -313,24 +440,43 @@ export async function migrateApiKeysFromSettings(
 
     const workspaceValue = inspected?.workspaceValue;
     const workspaceId = currentWorkspaceId();
-    if (
-      typeof workspaceValue === 'string' &&
-      workspaceValue.length > 0 &&
-      workspaceId
-    ) {
-      await storeMigratedSecret(
-        secrets,
-        workspaceSecretKey(provider, workspaceId),
-        workspaceValue,
-        replaceExisting
-      );
-      const failure = await clearLegacyScope(
-        rootConfig,
-        legacyKey,
-        vscode.ConfigurationTarget.Workspace
-      );
-      if (failure) {
-        cleanupFailures.push(failure);
+    if (typeof workspaceValue === 'string' && workspaceId) {
+      const primaryKey = workspaceSecretKey(provider, workspaceId);
+
+      if (workspaceValue.length === 0) {
+        // Explicit empty scoped override: keep a tombstone so global does not leak.
+        await storeWorkspaceScopedSecret(
+          secrets,
+          provider,
+          CLEARED_MARKER,
+          true
+        );
+        const failure = await clearLegacyScope(
+          rootConfig,
+          legacyKey,
+          vscode.ConfigurationTarget.Workspace
+        );
+        if (failure) {
+          cleanupFailures.push(failure);
+        }
+      } else {
+        const failure = await migrateScopeValue(
+          secrets,
+          primaryKey,
+          workspaceValue,
+          replaceExisting,
+          (replace) =>
+            storeWorkspaceScopedSecret(secrets, provider, workspaceValue, replace),
+          () =>
+            clearLegacyScope(
+              rootConfig,
+              legacyKey,
+              vscode.ConfigurationTarget.Workspace
+            )
+        );
+        if (failure) {
+          cleanupFailures.push(failure);
+        }
       }
     }
 
@@ -346,20 +492,38 @@ export async function migrateApiKeysFromSettings(
       );
       const folderInspected = folderConfig.inspect<string>(legacyKey);
       const folderValue = folderInspected?.workspaceFolderValue;
-      if (typeof folderValue !== 'string' || folderValue.length === 0) {
+      if (typeof folderValue !== 'string') {
         continue;
       }
 
-      await storeMigratedSecret(
+      const folderKey = folderSecretKey(provider, folder.uri.toString());
+
+      if (folderValue.length === 0) {
+        await storeMigratedSecret(secrets, folderKey, CLEARED_MARKER, true);
+        const failure = await clearLegacyScope(
+          folderConfig,
+          legacyKey,
+          vscode.ConfigurationTarget.WorkspaceFolder
+        );
+        if (failure) {
+          cleanupFailures.push(failure);
+        }
+        continue;
+      }
+
+      const failure = await migrateScopeValue(
         secrets,
-        folderSecretKey(provider, folder.uri.toString()),
+        folderKey,
         folderValue,
-        replaceExisting
-      );
-      const failure = await clearLegacyScope(
-        folderConfig,
-        legacyKey,
-        vscode.ConfigurationTarget.WorkspaceFolder
+        replaceExisting,
+        (replace) =>
+          storeMigratedSecret(secrets, folderKey, folderValue, replace),
+        () =>
+          clearLegacyScope(
+            folderConfig,
+            legacyKey,
+            vscode.ConfigurationTarget.WorkspaceFolder
+          )
       );
       if (failure) {
         cleanupFailures.push(failure);
