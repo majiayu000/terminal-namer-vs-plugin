@@ -83,7 +83,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      const outcome = await renameTerminalWithAI(terminal, commands);
+      // Auto-rename may reuse a focus-skip pendingName; manual commands must not.
+      const outcome = await renameTerminalWithAI(terminal, commands, {
+        reusePendingName: true
+      });
       terminalTreeProvider?.refresh();
       // Propagate tri-state so focus skips stay retryable while provider/
       // configuration failures suppress further auto-rename attempts.
@@ -371,9 +374,10 @@ async function dispatchRenameWithArg(
     return true;
   }
 
-  // Mid-dispatch focus steal: roll back terminals that wrongly received `name`
-  // (depth was > 0 so nested recovery still has budget, or refuses further
-  // unprotected dispatches at depth 0 without skipping detection).
+  // Mid-dispatch focus steal: renameWithArg can only rename one terminal.
+  // Collect candidates first — multiple matches means an independent same-name
+  // title update is mixed in; abort rather than clobber unrelated titles.
+  const collateral: Array<{ terminal: vscode.Terminal; prior: string }> = [];
   for (const candidate of vscode.window.terminals) {
     if (candidate === terminal) {
       continue;
@@ -390,9 +394,15 @@ async function dispatchRenameWithArg(
       // Already had the intended title before dispatch — not new collateral.
       continue;
     }
-    if (candidate.name !== name) {
-      continue;
+    if (candidate.name === name) {
+      collateral.push({ terminal: candidate, prior });
     }
+  }
+  if (collateral.length > 1) {
+    return false;
+  }
+  if (collateral.length === 1) {
+    const { terminal: candidate, prior } = collateral[0];
     const restored = await dispatchRenameWithArg(
       candidate,
       prior,
@@ -461,6 +471,12 @@ async function restoreCollateralRenames(
   intendedName: string,
   nameByTerminal: Map<vscode.Terminal, string>
 ): Promise<boolean> {
+  // renameWithArg affects at most one terminal. Multiple post-dispatch matches
+  // for intendedName (with a different pre-snapshot title) are ambiguous —
+  // another terminal may have independently adopted the same title. Abort
+  // rather than restoring unrelated titles.
+  const collateral: Array<{ terminal: vscode.Terminal; previousName: string }> =
+    [];
   for (const candidate of vscode.window.terminals) {
     if (candidate === target) {
       continue;
@@ -478,20 +494,29 @@ async function restoreCollateralRenames(
       continue;
     }
     if (candidate.name === intendedName) {
-      const restored = await restoreTerminalName(
-        candidate,
-        previousName,
-        intendedName
-      );
-      if (!restored) {
-        return false;
-      }
-      // Still bearing the collateral title means restore did not take effect.
-      // A different title (previousName or a newer legitimate name) is OK.
-      if (candidate.name === intendedName) {
-        return false;
-      }
+      collateral.push({ terminal: candidate, previousName });
     }
+  }
+  if (collateral.length > 1) {
+    return false;
+  }
+  if (collateral.length === 0) {
+    return true;
+  }
+
+  const { terminal: candidate, previousName } = collateral[0];
+  const restored = await restoreTerminalName(
+    candidate,
+    previousName,
+    intendedName
+  );
+  if (!restored) {
+    return false;
+  }
+  // Still bearing the collateral title means restore did not take effect.
+  // A different title (previousName or a newer legitimate name) is OK.
+  if (candidate.name === intendedName) {
+    return false;
   }
   return true;
 }
@@ -567,6 +592,15 @@ async function renameTerminalSafely(
 /** Outcome of an AI rename attempt for callers that need skip vs failure. */
 type RenameOutcome = 'renamed' | 'skipped' | 'failed';
 
+type RenameTerminalOptions = {
+  /**
+   * When true (auto-rename only), reuse a focus-skip cached pendingName.
+   * Manual current/selected/rename-all paths must pass false/omit so a fresh
+   * generateName runs against the caller's full command history.
+   */
+  reusePendingName?: boolean;
+};
+
 /**
  * 使用 AI 重命名终端
  * @returns `renamed` on success, `skipped` when focus/restore could not hold
@@ -575,7 +609,8 @@ type RenameOutcome = 'renamed' | 'skipped' | 'failed';
  */
 async function renameTerminalWithAI(
   terminal: vscode.Terminal,
-  commands: string[]
+  commands: string[],
+  options?: RenameTerminalOptions
 ): Promise<RenameOutcome> {
   try {
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
@@ -583,6 +618,14 @@ async function renameTerminalWithAI(
 
     const provider = createProvider();
     const cwd = getTerminalCwd(terminal);
+    // Capture so a mid-flight provider/language change discards the stale name
+    // before apply/cache (cooldown already ignores stale failures separately).
+    const configGenerationAtStart =
+      tracker?.getProviderConfigGeneration() ?? 0;
+
+    const isProviderConfigCurrent = (): boolean =>
+      !tracker ||
+      configGenerationAtStart === tracker.getProviderConfigGeneration();
 
     let outcome: RenameOutcome = 'skipped';
 
@@ -595,9 +638,18 @@ async function renameTerminalWithAI(
       async () => {
         // Reuse a name already paid for on a prior focus-skip so every subsequent
         // shell command does not re-call generateName while focus keeps failing.
-        const pendingName = tracker?.getPendingName(terminal);
+        // Only auto-rename may take this path — manual commands always regenerate.
+        const pendingName =
+          options?.reusePendingName === true
+            ? tracker?.getPendingName(terminal)
+            : undefined;
         let name: string;
         if (pendingName) {
+          if (!isProviderConfigCurrent()) {
+            tracker?.clearPendingName(terminal);
+            outcome = 'skipped';
+            return;
+          }
           name = pendingName;
         } else {
           const result = await provider.generateName({ commands, language, cwd });
@@ -610,14 +662,26 @@ async function renameTerminalWithAI(
               result.usage.completionTokens
             );
           }
+
+          // Settings changed while generateName was in flight — discard.
+          if (!isProviderConfigCurrent()) {
+            tracker?.clearPendingName(terminal);
+            outcome = 'skipped';
+            return;
+          }
           name = result.name;
         }
 
         // After AI generation: serialize rename + re-check focus before renameWithArg
         const renamed = await renameTerminalSafely(terminal, name);
         if (!renamed) {
-          // Retain the generated name for the next auto-rename attempt.
-          tracker?.setPendingName(terminal, name);
+          // Retain the generated name for the next auto-rename attempt only when
+          // the provider config that produced it is still current.
+          if (isProviderConfigCurrent()) {
+            tracker?.setPendingName(terminal, name);
+          } else {
+            tracker?.clearPendingName(terminal);
+          }
           // Do not resetNamed here: auto-rename already keys off the outcome,
           // and clearing named would erase a prior successful manual/auto name
           // after a failed focus-held rename attempt.

@@ -299,6 +299,14 @@ export class TerminalTracker {
     }
   }
 
+  /**
+   * Provider/settings generation for stale in-flight generateName guards.
+   * Callers capture this at start and must discard results when it changes.
+   */
+  getProviderConfigGeneration(): number {
+    return this.providerConfigGeneration;
+  }
+
   dispose() {
     this.disposables.forEach((d) => d.dispose());
     this.terminalDataMap.clear();
