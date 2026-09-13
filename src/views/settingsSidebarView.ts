@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import { UsageTracker } from '../core';
 import {
   ApiKeyProvider,
+  ApiKeySource,
   clearLegacyApiKeySettings,
   deleteApiKey,
-  hasApiKey,
+  getApiKeySource,
   setApiKey,
 } from '../secrets';
 
@@ -84,8 +85,8 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    void this._sendCurrentSettings();
-    this.updateStats();
+    // Webview posts getSettings on load; avoid a second host-side payload that
+    // would also reset the API key input and wipe in-progress typing.
   }
 
   private _providerFromSettings(provider: unknown): ApiKeyProvider | undefined {
@@ -124,19 +125,21 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         command: 'apiKeyStatus',
         provider,
         hasApiKey: true,
+        apiKeySource: 'none',
       });
       return;
     }
 
     const secretProvider = this._providerFromSettings(provider);
-    const configured = secretProvider
-      ? await hasApiKey(this._context, secretProvider)
-      : false;
+    const apiKeySource: ApiKeySource = secretProvider
+      ? await getApiKeySource(this._context, secretProvider)
+      : 'none';
 
     this._view.webview.postMessage({
       command: 'apiKeyStatus',
       provider,
-      hasApiKey: configured,
+      hasApiKey: apiKeySource !== 'none',
+      apiKeySource,
     });
   }
 
@@ -180,10 +183,10 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const provider = config.get<string>('provider', 'openrouter');
-    const apiKeyConfigured =
+    const apiKeySource: ApiKeySource =
       provider === 'ollama'
-        ? true
-        : await hasApiKey(
+        ? 'none'
+        : await getApiKeySource(
             this._context,
             provider === 'openai' || provider === 'claude' ? provider : 'openrouter'
           );
@@ -192,7 +195,8 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       command: 'loadSettings',
       settings: {
         provider,
-        hasApiKey: apiKeyConfigured,
+        hasApiKey: provider === 'ollama' ? true : apiKeySource !== 'none',
+        apiKeySource: provider === 'ollama' ? 'none' : apiKeySource,
         openrouterModel: config.get('openrouterModel', 'google/gemini-2.5-flash'),
         autoRename: config.get('autoRename', true),
         commandThreshold: config.get('commandThreshold', 3),
@@ -441,7 +445,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('apiKey').value = '';
       const provider = document.getElementById('provider').value;
       if (provider === 'ollama') {
-        updateStatus(true, { resetInput: true });
+        updateStatus(true, { resetInput: true, apiKeySource: 'none' });
         return;
       }
       // Query SecretStorage for the newly selected provider instead of forcing missing.
@@ -508,6 +512,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
     function updateStatus(hasKey, options) {
       const resetInput = !!(options && options.resetInput);
+      const apiKeySource = options && options.apiKeySource;
       const status = document.getElementById('status');
       const hint = document.getElementById('apiKeyHint');
       const clearBtn = document.getElementById('clearApiKeyBtn');
@@ -519,7 +524,9 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
       if (resetInput) {
         input.value = '';
       }
-      input.placeholder = hasKey ? '•••••••• (saved securely)' : 'Enter API Key';
+      input.placeholder = hasKey
+        ? (apiKeySource === 'legacy' ? '•••••••• (legacy settings)' : '•••••••• (saved securely)')
+        : 'Enter API Key';
       hint.style.display = hasKey ? 'block' : 'none';
       clearBtn.style.display = hasKey && provider !== 'ollama' ? 'block' : 'none';
       if (provider === 'ollama') {
@@ -527,8 +534,13 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (hasKey) {
-        status.className = 'status success';
-        status.textContent = 'API Key configured (SecretStorage)';
+        if (apiKeySource === 'legacy') {
+          status.className = 'status warning';
+          status.textContent = 'API Key still in plaintext settings (conflicting workspace value retained)';
+        } else {
+          status.className = 'status success';
+          status.textContent = 'API Key configured (SecretStorage)';
+        }
         status.style.display = 'block';
       } else {
         status.className = 'status warning';
@@ -550,7 +562,10 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           document.getElementById('model').value = s.openrouterModel;
         }
 
-        updateStatus(!!s.hasApiKey, { resetInput: true });
+        updateStatus(!!s.hasApiKey, {
+          resetInput: true,
+          apiKeySource: s.apiKeySource || (s.hasApiKey ? 'secret' : 'none'),
+        });
         syncProviderUi();
       } else if (message.command === 'apiKeyStatus') {
         // Ignore stale replies if the user already changed selection again.
@@ -558,7 +573,10 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
           return;
         }
         // Preserve any in-progress typed key while the async status reply arrives.
-        updateStatus(!!message.hasApiKey, { resetInput: false });
+        updateStatus(!!message.hasApiKey, {
+          resetInput: false,
+          apiKeySource: message.apiKeySource || (message.hasApiKey ? 'secret' : 'none'),
+        });
         syncProviderUi();
       } else if (message.command === 'updateStats') {
         updateStats(message.stats);

@@ -16,8 +16,16 @@ const LEGACY_CONFIG_KEYS: Record<ApiKeyProvider, string> = {
   claude: 'claudeApiKey',
 };
 
-/** globalState marker so an explicit Clear cannot remigrate retained plaintext. */
+/**
+ * Legacy combined map for cleared providers (pre-per-provider keys).
+ * Still read for backwards compatibility; new writes use per-provider keys.
+ */
 const CLEARED_API_KEYS_STATE = 'terminalAiNamer.clearedApiKeys';
+
+/** Independent globalState key so concurrent clears cannot clobber each other. */
+function clearedApiKeyStateKey(provider: ApiKeyProvider): string {
+  return `terminalAiNamer.clearedApiKey.${provider}`;
+}
 
 /**
  * Providers whose SecretStorage value was explicitly set via the sidebar and
@@ -54,7 +62,7 @@ type EffectiveLegacy =
   | { kind: 'empty' }
   | { kind: 'value'; value: string };
 
-function readClearedProviders(
+function readLegacyClearedProviders(
   context: vscode.ExtensionContext
 ): Partial<Record<ApiKeyProvider, true>> {
   return context.globalState.get<Partial<Record<ApiKeyProvider, true>>>(
@@ -67,27 +75,35 @@ async function markApiKeyCleared(
   context: vscode.ExtensionContext,
   provider: ApiKeyProvider
 ): Promise<void> {
-  const cleared = { ...readClearedProviders(context), [provider]: true as const };
-  await context.globalState.update(CLEARED_API_KEYS_STATE, cleared);
+  // Per-provider key avoids lost-update races when two windows clear different
+  // providers concurrently against a shared map.
+  await context.globalState.update(clearedApiKeyStateKey(provider), true);
 }
 
 async function clearApiKeyClearedMarker(
   context: vscode.ExtensionContext,
   provider: ApiKeyProvider
 ): Promise<void> {
-  const cleared = { ...readClearedProviders(context) };
-  if (!cleared[provider]) {
+  await context.globalState.update(clearedApiKeyStateKey(provider), undefined);
+  const legacy = { ...readLegacyClearedProviders(context) };
+  if (!legacy[provider]) {
     return;
   }
-  delete cleared[provider];
-  await context.globalState.update(CLEARED_API_KEYS_STATE, cleared);
+  delete legacy[provider];
+  await context.globalState.update(
+    CLEARED_API_KEYS_STATE,
+    Object.keys(legacy).length > 0 ? legacy : undefined
+  );
 }
 
 function isApiKeyCleared(
   context: vscode.ExtensionContext,
   provider: ApiKeyProvider
 ): boolean {
-  return Boolean(readClearedProviders(context)[provider]);
+  if (context.globalState.get<boolean>(clearedApiKeyStateKey(provider))) {
+    return true;
+  }
+  return Boolean(readLegacyClearedProviders(context)[provider]);
 }
 
 function readSecretOverrideProviders(
@@ -171,6 +187,31 @@ function currentWorkspaceResource(): vscode.Uri | undefined {
 }
 
 /**
+ * Map a string terminal cwd onto a workspace folder URI so remote schemes
+ * (e.g. vscode-remote:) are preserved instead of forcing file:.
+ */
+function uriForTerminalCwdString(cwd: string): vscode.Uri {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const normalized = cwd.replace(/\\/g, '/');
+  let best: vscode.WorkspaceFolder | undefined;
+  let bestLen = -1;
+  for (const folder of folders) {
+    const folderPath = folder.uri.fsPath.replace(/\\/g, '/');
+    const prefix = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
+    if (normalized === folderPath || normalized.startsWith(prefix)) {
+      if (folderPath.length > bestLen) {
+        best = folder;
+        bestLen = folderPath.length;
+      }
+    }
+  }
+  if (best) {
+    return best.uri;
+  }
+  return vscode.Uri.file(cwd);
+}
+
+/**
  * Resolve configuration against the terminal's workspace folder when possible.
  * Falls back to the first workspace folder only when no terminal cwd is known.
  */
@@ -183,7 +224,7 @@ export function resourceForTerminal(terminal: vscode.Terminal): vscode.Uri | und
   const creationOptions = terminal.creationOptions;
   if (creationOptions && 'cwd' in creationOptions && creationOptions.cwd) {
     const cwd = creationOptions.cwd;
-    return typeof cwd === 'string' ? vscode.Uri.file(cwd) : cwd;
+    return typeof cwd === 'string' ? uriForTerminalCwdString(cwd) : cwd;
   }
 
   return currentWorkspaceResource();
@@ -228,9 +269,36 @@ export async function setApiKey(
   provider: ApiKeyProvider,
   apiKey: string
 ): Promise<void> {
-  await clearApiKeyClearedMarker(context, provider);
-  await markSecretOverridesLegacy(context, provider);
+  const wasCleared = isApiKeyCleared(context, provider);
+  const hadOverride = secretOverridesLegacy(context, provider);
+
+  // Store first so a rejected write cannot leave override markers claiming a
+  // replacement that never landed.
   await context.secrets.store(SECRET_KEYS[provider], apiKey);
+
+  try {
+    await clearApiKeyClearedMarker(context, provider);
+    await markSecretOverridesLegacy(context, provider);
+  } catch (error) {
+    try {
+      if (wasCleared) {
+        await markApiKeyCleared(context, provider);
+      } else {
+        await clearApiKeyClearedMarker(context, provider);
+      }
+      if (hadOverride) {
+        await markSecretOverridesLegacy(context, provider);
+      } else {
+        await clearSecretOverridesLegacy(context, provider);
+      }
+    } catch (restoreError) {
+      console.error(
+        'Failed to restore API key markers after partial setApiKey:',
+        restoreError
+      );
+    }
+    throw error;
+  }
 }
 
 export async function deleteApiKey(
@@ -305,6 +373,46 @@ export async function hasApiKey(
   return Boolean(value);
 }
 
+/** Where the effective credential currently comes from for UI messaging. */
+export type ApiKeySource = 'none' | 'secret' | 'legacy';
+
+/**
+ * Resolve whether the effective key is SecretStorage or retained plaintext.
+ * Used so the sidebar does not claim "SecretStorage" when a conflicting
+ * workspace settings.json value is still what getApiKey returns.
+ */
+export async function getApiKeySource(
+  context: vscode.ExtensionContext,
+  provider: ApiKeyProvider,
+  resource?: vscode.Uri
+): Promise<ApiKeySource> {
+  if (isApiKeyCleared(context, provider)) {
+    return 'none';
+  }
+
+  const secret = await context.secrets.get(SECRET_KEYS[provider]);
+
+  if (secretOverridesLegacy(context, provider)) {
+    return secret ? 'secret' : 'none';
+  }
+
+  const resolvedResource = resource ?? currentWorkspaceResource();
+  const legacy = effectiveLegacyForResource(provider, resolvedResource);
+  if (legacy.kind === 'empty') {
+    return 'none';
+  }
+  if (legacy.kind === 'value') {
+    if (!secret || secret !== legacy.value) {
+      return 'legacy';
+    }
+    // Values match: SecretStorage holds the credential; leftover plaintext is
+    // compatible residue pending cleanup, not a conflicting retained key.
+    return 'secret';
+  }
+
+  return secret ? 'secret' : 'none';
+}
+
 function readScopedString(
   inspect: InspectedString,
   target: vscode.ConfigurationTarget
@@ -336,11 +444,25 @@ async function clearCompatibleLegacyScopes(
     return;
   }
 
+  // Attempt every matching scope even if an earlier one fails (e.g. read-only
+  // global settings) so writable workspace/folder leftovers still clear.
+  const failures: unknown[] = [];
   for (const target of LEGACY_SCOPES) {
     const scoped = readScopedString(inspected, target);
     if (typeof scoped === 'string' && scoped.length > 0 && scoped === retainedSecret) {
-      await config.update(configKey, undefined, target);
+      try {
+        await config.update(configKey, undefined, target);
+      } catch (error) {
+        failures.push(error);
+      }
     }
+  }
+
+  if (failures.length > 0) {
+    const detail = failures
+      .map((error) => (error instanceof Error ? error.message : String(error)))
+      .join('; ');
+    throw new Error(`Failed to clear some compatible legacy API key settings: ${detail}`);
   }
 }
 
