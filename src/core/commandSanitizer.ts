@@ -12,9 +12,12 @@ export interface SanitizeOptions {
 
 const DEFAULT_MAX_LENGTH = 120;
 
-/** Assignment-style secrets: TOKEN=..., KEY=..., PASSWORD=..., etc. */
+/**
+ * Assignment-style secrets: TOKEN=..., KEY=..., PASSWORD=..., including quoted
+ * values that may contain whitespace (e.g. export API_KEY="correct horse").
+ */
 const ENV_ASSIGNMENT =
-  /\b(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['"]?)([^\s'"]+)\2/g;
+  /\b(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/g;
 
 const SECRET_ENV_NAME =
   /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|BEARER|AUTH|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|(?:^|_)KEY(?:_|$))/i;
@@ -23,22 +26,65 @@ const SECRET_ENV_NAME =
 const AUTH_HEADER =
   /(?:Authorization|X-Api-Key|X-Auth-Token)\s*[:=]\s*(?:Bearer\s+|Basic\s+)?['"]?[^\s'"]+/gi;
 
-/** Common password / token CLI flags with their values */
-const SECRET_FLAGS =
-  /(?:^|\s)(?:-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth)(?:=|\s+)(['"]?)[^\s'"]+\1/gi;
+/** Common password / token / user CLI flags with their values */
+const SECRET_FLAG_NAMES =
+  '-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth|-u|--user';
+
+const SECRET_FLAGS = new RegExp(
+  `(?:^|\\s)(?:${SECRET_FLAG_NAMES})(?:=|\\s+)(['"]?)[^\\s'"]+\\1`,
+  'gi'
+);
 
 /** mysql/psql style -pPASSWORD (no space) */
 const COMPACT_PASSWORD_FLAG = /(?:^|\s)-p(?!$)([^\s-][^\s]*)/g;
 
-/** High-entropy tokens (API keys, JWTs, long hex/base64) */
+/** High-entropy tokens (API keys, JWTs, long hex/base64 including `/`) */
 const HIGH_ENTROPY =
   /(?:^|[^A-Za-z0-9+/=_.-])([A-Za-z0-9+/=_.-]{32,})(?![A-Za-z0-9+/=_.-])/g;
 
-/** scp/ssh/rsync user:password@host */
-const URL_EMBEDDED_CREDS = /:\/\/[^/\s:@]+:[^/\s@]+@/g;
-const USERINFO_CREDS = /\b([A-Za-z0-9._-]+):([^@\s/]+)@/g;
+/** URL userinfo credentials, including empty username (`redis://:pass@host`) */
+const URL_EMBEDDED_CREDS = /:\/\/[^/\s:@]*:[^/\s@]+@/g;
+const USERINFO_CREDS = /\b([A-Za-z0-9._-]*):([^@\s/]+)@/g;
 
 const REDACTED = '[REDACTED]';
+
+/**
+ * Skip leading shell VAR=value assignments, including quoted values with spaces.
+ */
+function skipLeadingAssignments(command: string): string {
+  let i = 0;
+  const s = command;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i]!)) {
+      i++;
+    }
+    const rest = s.slice(i);
+    const m = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+    if (!m) {
+      break;
+    }
+    i += m[0].length;
+    if (s[i] === '"' || s[i] === "'") {
+      const q = s[i]!;
+      i++;
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === '\\' && i + 1 < s.length) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i < s.length) {
+        i++; // closing quote
+      }
+    } else {
+      while (i < s.length && !/\s/.test(s[i]!)) {
+        i++;
+      }
+    }
+  }
+  return s.slice(i).trimStart();
+}
 
 /**
  * Extract argv0 (command name) from a shell command line.
@@ -50,8 +96,7 @@ export function extractArgv0(command: string): string {
     return '';
   }
 
-  // Skip leading VAR=value assignments
-  const withoutEnv = trimmed.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, '');
+  const withoutEnv = skipLeadingAssignments(trimmed);
   const first = withoutEnv.split(/\s+/)[0] || '';
   // Drop path: /usr/bin/npm → npm, .\foo.cmd → foo.cmd
   const base = first.replace(/^.*[/\\]/, '');
@@ -60,10 +105,6 @@ export function extractArgv0(command: string): string {
 
 function redactHighEntropy(command: string): string {
   return command.replace(HIGH_ENTROPY, (match, token: string) => {
-    // Keep short path-like segments and common non-secret identifiers
-    if (token.includes('/') || token.includes('\\')) {
-      return match;
-    }
     // Skip if mostly the same character (unlikely a secret)
     if (/^(.)\1+$/.test(token)) {
       return match;
@@ -101,12 +142,20 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
     return '';
   }
 
-  result = result.replace(ENV_ASSIGNMENT, (full, name: string, _quote: string, value: string) => {
-    if (!SECRET_ENV_NAME.test(name)) {
-      return full;
+  result = result.replace(
+    ENV_ASSIGNMENT,
+    (full, name: string, singleQuoted?: string, doubleQuoted?: string, bare?: string) => {
+      if (!SECRET_ENV_NAME.test(name)) {
+        return full;
+      }
+      const value = singleQuoted ?? doubleQuoted ?? bare ?? '';
+      // Reconstruct so only the assignment value is redacted
+      const exportPrefix = full.match(/^export\s+/i)?.[0] ?? '';
+      const quote =
+        singleQuoted !== undefined ? "'" : doubleQuoted !== undefined ? '"' : '';
+      return `${exportPrefix}${name}=${quote}${REDACTED}${quote}`;
     }
-    return full.replace(value, REDACTED);
-  });
+  );
 
   result = result.replace(AUTH_HEADER, (m) => {
     const sep = m.search(/[:=]/);
@@ -118,7 +167,9 @@ export function sanitizeCommand(command: string, options: SanitizeOptions = {}):
 
   result = result.replace(SECRET_FLAGS, (m) => {
     const trimmedFlag = m.trimStart();
-    const flagMatch = trimmedFlag.match(/^(-p|--password|--passwd|--pass|--secret|--token|--api[-_]?key|--access[-_]?key|--auth)/i);
+    const flagMatch = trimmedFlag.match(
+      new RegExp(`^(${SECRET_FLAG_NAMES})`, 'i')
+    );
     const flag = flagMatch ? flagMatch[1] : '--secret';
     const leading = m.slice(0, m.length - trimmedFlag.length);
     return `${leading}${flag}=${REDACTED}`;

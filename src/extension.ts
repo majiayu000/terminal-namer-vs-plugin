@@ -17,8 +17,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      await renameTerminalWithAI(terminal, commands, { interactive: false });
+      const renamed = await renameTerminalWithAI(terminal, commands, { interactive: false });
       terminalTreeProvider?.refresh();
+      return renamed;
     });
 
     // 初始化侧边栏 - 终端列表
@@ -158,16 +159,22 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         let renamedCount = 0;
+        let attempted = 0;
         for (const terminal of terminals) {
           const commands = tracker?.getCommands(terminal) || [];
           if (commands.length > 0) {
-            await renameTerminalWithAI(terminal, commands);
-            renamedCount++;
+            attempted++;
+            const renamed = await renameTerminalWithAI(terminal, commands);
+            if (renamed) {
+              renamedCount++;
+            }
           }
         }
 
-        if (renamedCount === 0) {
+        if (attempted === 0) {
           vscode.window.showWarningMessage('所有终端都没有命令历史');
+        } else if (renamedCount === 0) {
+          vscode.window.showWarningMessage('没有终端被重命名（可能未同意发送命令历史）');
         } else {
           vscode.window.showInformationMessage(`已重命名 ${renamedCount} 个终端`);
         }
@@ -218,12 +225,22 @@ function getTerminalCwd(terminal: vscode.Terminal): string | undefined {
 }
 
 /**
+ * Consent must come from user/application settings only — workspace
+ * `.vscode/settings.json` must not be able to self-grant upload permission.
+ */
+function hasUserCommandHistoryConsent(): boolean {
+  const config = vscode.workspace.getConfiguration('terminalAiNamer');
+  const inspected = config.inspect<boolean>('allowSendCommandHistory');
+  // application-scoped settings are stored in user/global settings only
+  return inspected?.globalValue === true;
+}
+
+/**
  * Ensure the user has explicitly consented to sending command history to AI.
  * Returns false if rename should abort.
  */
 async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolean> {
-  const config = vscode.workspace.getConfiguration('terminalAiNamer');
-  if (config.get<boolean>('allowSendCommandHistory', false)) {
+  if (hasUserCommandHistoryConsent()) {
     return true;
   }
 
@@ -241,6 +258,7 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
   );
 
   if (choice === '同意并继续') {
+    const config = vscode.workspace.getConfiguration('terminalAiNamer');
     await config.update('allowSendCommandHistory', true, vscode.ConfigurationTarget.Global);
     return true;
   }
@@ -253,13 +271,14 @@ async function ensureCommandHistoryConsent(interactive: boolean): Promise<boolea
 }
 
 /**
- * 使用 AI 重命名终端
+ * 使用 AI 重命名终端.
+ * @returns true when the terminal was renamed successfully.
  */
 async function renameTerminalWithAI(
   terminal: vscode.Terminal,
   commands: string[],
   options: { interactive?: boolean } = {}
-) {
+): Promise<boolean> {
   try {
     const interactive = options.interactive !== false;
     const consented = await ensureCommandHistoryConsent(interactive);
@@ -267,7 +286,7 @@ async function renameTerminalWithAI(
       if (interactive) {
         vscode.window.showInformationMessage('已取消：未同意发送命令历史，不会调用 AI 命名。');
       }
-      return;
+      return false;
     }
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
@@ -277,6 +296,7 @@ async function renameTerminalWithAI(
     const provider = createProvider();
     const cwd = getTerminalCwd(terminal);
 
+    let renamed = false;
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -305,6 +325,7 @@ async function renameTerminalWithAI(
 
         // 标记为已命名
         tracker?.markAsNamed(terminal);
+        renamed = true;
 
         // 刷新侧边栏
         terminalTreeProvider?.refresh();
@@ -312,9 +333,11 @@ async function renameTerminalWithAI(
         vscode.window.showInformationMessage(`终端已命名为: ${result.name}`);
       }
     );
+    return renamed;
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
+    return false;
   }
 }
 

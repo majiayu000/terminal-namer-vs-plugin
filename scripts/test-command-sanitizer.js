@@ -40,6 +40,14 @@ console.log('commandSanitizer');
 }
 
 {
+  console.log('\nquoted env secret with whitespace');
+  const out = sanitizeCommand('export API_KEY="correct horse battery staple" npm test');
+  assertIncludes(out, '[REDACTED]', 'redacts quoted API_KEY with spaces');
+  assertNotIncludes(out, 'correct horse', 'removes passphrase words');
+  assertIncludes(out, 'npm test', 'keeps remaining command after quoted assignment');
+}
+
+{
   console.log('\nAuthorization headers');
   const out = sanitizeCommand(
     "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig' https://api.example.com"
@@ -64,6 +72,24 @@ console.log('commandSanitizer');
 }
 
 {
+  console.log('\ncurl -u / --user credentials');
+  const short = sanitizeCommand('curl -u admin:hunter2 https://example.com');
+  assertIncludes(short, '[REDACTED]', 'redacts curl -u credentials');
+  assertNotIncludes(short, 'hunter2', 'removes curl -u password');
+
+  const long = sanitizeCommand('curl --user admin:hunter2 https://example.com');
+  assertIncludes(long, '[REDACTED]', 'redacts curl --user credentials');
+  assertNotIncludes(long, 'hunter2', 'removes curl --user password');
+}
+
+{
+  console.log('\nempty-username credential URLs');
+  const out = sanitizeCommand('REDIS_URL=redis://:hunter2@localhost/0 redis-cli');
+  assertIncludes(out, '[REDACTED]', 'redacts empty-user URL password');
+  assertNotIncludes(out, 'hunter2', 'removes redis URL password');
+}
+
+{
   console.log('\nhigh-entropy tokens');
   const sk = sanitizeCommand(
     'curl https://api.openai.com -H "Authorization: Bearer sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"'
@@ -79,6 +105,12 @@ console.log('commandSanitizer');
     'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
     'removes high-entropy token value'
   );
+
+  const withSlash = sanitizeCommand(
+    'echo j4BI4fUN7ehtTXbsQYU/V0DZ579peci7ZGB9boNBv8o='
+  );
+  assertIncludes(withSlash, '[REDACTED]', 'redacts high-entropy base64 containing slash');
+  assertNotIncludes(withSlash, 'j4BI4fUN7ehtTXbsQYU/V0DZ579peci7ZGB9boNBv8o=', 'removes base64 with slash');
 }
 
 {
@@ -101,6 +133,14 @@ console.log('commandSanitizer');
     'argv0Only strips path and args'
   );
   assert(extractArgv0('FOO=1 BAR=2 docker compose up') === 'docker', 'extractArgv0 skips env');
+  assert(
+    extractArgv0('FOO="secret phrase" npm run dev') === 'npm',
+    'extractArgv0 skips quoted assignment with spaces'
+  );
+  assert(
+    sanitizeCommand('FOO="secret phrase" npm run dev', { argv0Only: true }) === 'npm',
+    'argv0Only does not leak quoted assignment fragments'
+  );
 }
 
 {

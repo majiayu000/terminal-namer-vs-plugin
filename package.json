@@ -224,7 +224,8 @@
         "terminalAiNamer.allowSendCommandHistory": {
           "type": "boolean",
           "default": false,
-          "description": "同意将（已脱敏的）终端命令历史发送到所选 AI 提供商以生成终端名称。未开启时不会上传命令历史。"
+          "scope": "application",
+          "description": "同意将（已脱敏的）终端命令历史发送到所选 AI 提供商以生成终端名称。仅用户级设置可开启；工作区不能授予此权限。未开启时不会上传命令历史。"
         },
         "terminalAiNamer.commandPrivacyMode": {
           "type": "string",

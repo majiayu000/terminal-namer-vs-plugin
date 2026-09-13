@@ -11,11 +11,18 @@ interface TerminalData {
 export class TerminalTracker {
   private terminalDataMap = new Map<vscode.Terminal, TerminalData>();
   private disposables: vscode.Disposable[] = [];
-  private onCommandThresholdReached: (terminal: vscode.Terminal, commands: string[]) => void;
+  private onCommandThresholdReached: (
+    terminal: vscode.Terminal,
+    commands: string[]
+  ) => void | Promise<void | boolean>;
   private commandThreshold: number;
+  private renameInFlight = new Set<vscode.Terminal>();
 
   constructor(
-    onCommandThresholdReached: (terminal: vscode.Terminal, commands: string[]) => void
+    onCommandThresholdReached: (
+      terminal: vscode.Terminal,
+      commands: string[]
+    ) => void | Promise<void | boolean>
   ) {
     this.onCommandThresholdReached = onCommandThresholdReached;
     this.commandThreshold = this.getCommandThreshold();
@@ -107,10 +114,26 @@ export class TerminalTracker {
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const autoRename = config.get<boolean>('autoRename', true);
 
-    if (autoRename && !data.named && data.commands.length >= this.commandThreshold) {
-      // 触发命名回调
-      this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold));
-      data.named = true;
+    if (
+      autoRename &&
+      !data.named &&
+      !this.renameInFlight.has(terminal) &&
+      data.commands.length >= this.commandThreshold
+    ) {
+      // Only mark named after a successful rename. Consent refusal / failure
+      // must leave the terminal pending so enabling consent can still auto-rename.
+      this.renameInFlight.add(terminal);
+      void Promise.resolve(
+        this.onCommandThresholdReached(terminal, data.commands.slice(0, this.commandThreshold))
+      )
+        .then((renamed) => {
+          if (renamed === true) {
+            data.named = true;
+          }
+        })
+        .finally(() => {
+          this.renameInFlight.delete(terminal);
+        });
     }
   }
 
