@@ -168,6 +168,13 @@ export class TerminalTracker {
   }
 
   /**
+   * True while auto-rename owns an outstanding AI request for this terminal.
+   */
+  isInFlight(terminal: vscode.Terminal): boolean {
+    return this.terminalDataMap.get(terminal)?.renaming === true;
+  }
+
+  /**
    * 标记终端为已命名
    */
   markAsNamed(terminal: vscode.Terminal) {
