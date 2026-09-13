@@ -83,9 +83,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 初始化终端追踪器
     tracker = new TerminalTracker(async (terminal, commands) => {
-      const renamed = await renameTerminalWithAI(terminal, commands);
+      const outcome = await renameTerminalWithAI(terminal, commands);
       terminalTreeProvider?.refresh();
-      return renamed;
+      // Propagate tri-state so focus skips stay retryable while provider/
+      // configuration failures suppress further auto-rename attempts.
+      return outcome;
     });
 
     // 初始化侧边栏 - 终端列表
@@ -230,8 +232,8 @@ export function activate(context: vscode.ExtensionContext) {
           const commands = tracker?.getCommands(terminal) || [];
           if (commands.length > 0) {
             attemptedCount++;
-            const renamed = await renameTerminalWithAI(terminal, commands);
-            if (renamed) {
+            const outcome = await renameTerminalWithAI(terminal, commands);
+            if (outcome === 'renamed') {
               renamedCount++;
             }
           }
@@ -372,12 +374,20 @@ async function dispatchRenameWithArg(
   // Mid-dispatch focus steal: always roll back terminals that wrongly received
   // `name` (depth was > 0 so nested recovery still has budget, or refuses
   // further unprotected dispatches at depth 0 without skipping detection).
+  let nestedCollateralRestored = false;
   for (const candidate of vscode.window.terminals) {
     if (candidate === terminal) {
       continue;
     }
     const prior = nameByTerminal.get(candidate);
-    if (prior === undefined || prior === name) {
+    if (prior === undefined) {
+      // Opened after the snapshot and now bears `name` — cannot safely restore.
+      if (candidate.name === name) {
+        return false;
+      }
+      continue;
+    }
+    if (prior === name) {
       continue;
     }
     if (candidate.name !== name) {
@@ -396,9 +406,25 @@ async function dispatchRenameWithArg(
     if (candidate.name === name) {
       return false;
     }
+    nestedCollateralRestored = true;
   }
 
-  return false;
+  if (!nestedCollateralRestored) {
+    return false;
+  }
+
+  // Nested undo cleared collateral damage, but this terminal may still hold the
+  // erroneous title from the failed dispatch. Retry the parent rename rather
+  // than abandoning restoration after a successful nested rollback.
+  if (terminal.name === name) {
+    return true;
+  }
+  return dispatchRenameWithArg(
+    terminal,
+    name,
+    collateralDepth - 1,
+    expectedCurrentName
+  );
 }
 
 /**
@@ -444,7 +470,15 @@ async function restoreCollateralRenames(
       continue;
     }
     const previousName = nameByTerminal.get(candidate);
-    if (previousName === undefined || previousName === intendedName) {
+    if (previousName === undefined) {
+      // Terminal opened after the title snapshot and received intendedName.
+      // Missing prior title must not be treated as a successful no-op restore.
+      if (candidate.name === intendedName) {
+        return false;
+      }
+      continue;
+    }
+    if (previousName === intendedName) {
       continue;
     }
     if (candidate.name === intendedName) {
@@ -534,14 +568,19 @@ async function renameTerminalSafely(
   });
 }
 
+/** Outcome of an AI rename attempt for callers that need skip vs failure. */
+type RenameOutcome = 'renamed' | 'skipped' | 'failed';
+
 /**
  * 使用 AI 重命名终端
- * @returns true when the terminal was renamed successfully
+ * @returns `renamed` on success, `skipped` when focus/restore could not hold
+ * (retryable for auto-rename), `failed` on provider/configuration errors
+ * (should not re-arm auto-rename on every subsequent command).
  */
 async function renameTerminalWithAI(
   terminal: vscode.Terminal,
   commands: string[]
-): Promise<boolean> {
+): Promise<RenameOutcome> {
   try {
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const language = config.get<'zh' | 'en'>('language', 'zh');
@@ -549,7 +588,7 @@ async function renameTerminalWithAI(
     const provider = createProvider();
     const cwd = getTerminalCwd(terminal);
 
-    let renamed = false;
+    let outcome: RenameOutcome = 'skipped';
 
     await vscode.window.withProgress(
       {
@@ -570,14 +609,15 @@ async function renameTerminalWithAI(
         }
 
         // After AI generation: serialize rename + re-check focus before renameWithArg
-        renamed = await renameTerminalSafely(terminal, result.name);
+        const renamed = await renameTerminalSafely(terminal, result.name);
         if (!renamed) {
-          // Do not resetNamed here: auto-rename already keys off the boolean
-          // return value, and clearing named would erase a prior successful
-          // manual/auto name after a failed focus-held rename attempt.
+          // Do not resetNamed here: auto-rename already keys off the outcome,
+          // and clearing named would erase a prior successful manual/auto name
+          // after a failed focus-held rename attempt.
           vscode.window.showWarningMessage(
             `无法聚焦目标终端，已跳过命名（生成名称: ${result.name}）`
           );
+          outcome = 'skipped';
           return;
         }
 
@@ -588,16 +628,18 @@ async function renameTerminalWithAI(
         terminalTreeProvider?.refresh();
 
         vscode.window.showInformationMessage(`终端已命名为: ${result.name}`);
+        outcome = 'renamed';
       }
     );
 
-    return renamed;
+    return outcome;
   } catch (error) {
-    // Preserve prior named=true so a failed manual rename does not re-arm
-    // auto-rename. Auto path already sets named from the returned boolean.
+    // Provider/config failures (bad API key, quota, unreachable endpoint) are
+    // not focus skips — return `failed` so auto-rename does not re-arm on every
+    // shell command. Preserve prior named=true for already-named terminals.
     const message = error instanceof Error ? error.message : '未知错误';
     vscode.window.showErrorMessage(`命名失败: ${message}`);
-    return false;
+    return 'failed';
   }
 }
 

@@ -4,7 +4,17 @@ interface TerminalData {
   commands: string[];
   named: boolean;
   namingInProgress: boolean;
+  /** Permanent provider/config failure — do not re-arm auto-rename per command. */
+  autoRenameBlocked: boolean;
 }
+
+/** Auto-rename callback result: success, focus skip, or permanent failure. */
+export type AutoRenameResult =
+  | boolean
+  | 'renamed'
+  | 'skipped'
+  | 'failed'
+  | void;
 
 /**
  * 终端命令追踪器
@@ -15,14 +25,14 @@ export class TerminalTracker {
   private onCommandThresholdReached: (
     terminal: vscode.Terminal,
     commands: string[]
-  ) => boolean | void | Promise<boolean | void>;
+  ) => AutoRenameResult | Promise<AutoRenameResult>;
   private commandThreshold: number;
 
   constructor(
     onCommandThresholdReached: (
       terminal: vscode.Terminal,
       commands: string[]
-    ) => boolean | void | Promise<boolean | void>
+    ) => AutoRenameResult | Promise<AutoRenameResult>
   ) {
     this.onCommandThresholdReached = onCommandThresholdReached;
     this.commandThreshold = this.getCommandThreshold();
@@ -42,7 +52,8 @@ export class TerminalTracker {
         this.terminalDataMap.set(terminal, {
           commands: [],
           named: false,
-          namingInProgress: false
+          namingInProgress: false,
+          autoRenameBlocked: false
         });
       })
     );
@@ -75,7 +86,8 @@ export class TerminalTracker {
         this.terminalDataMap.set(terminal, {
           commands: [],
           named: false,
-          namingInProgress: false
+          namingInProgress: false,
+          autoRenameBlocked: false
         });
       }
     });
@@ -106,7 +118,12 @@ export class TerminalTracker {
 
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false, namingInProgress: false };
+      data = {
+        commands: [],
+        named: false,
+        namingInProgress: false,
+        autoRenameBlocked: false
+      };
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -126,6 +143,7 @@ export class TerminalTracker {
       autoRename &&
       !data.named &&
       !data.namingInProgress &&
+      !data.autoRenameBlocked &&
       data.commands.length >= this.commandThreshold
     ) {
       // Hold a rename lock until the async callback reports success/failure.
@@ -135,14 +153,21 @@ export class TerminalTracker {
       const commandsSnapshot = data.commands.slice(0, this.commandThreshold);
       void Promise.resolve(this.onCommandThresholdReached(terminal, commandsSnapshot))
         .then((result) => {
-          // Only promote to named on explicit success. On skip/failure, leave
+          // Only promote to named on explicit success. On focus skip, leave
           // an already-true named flag intact so a concurrent successful manual
           // rename (markAsNamed) is not overwritten back to false.
-          if (result === true) {
+          // Provider/config failures block further auto-rename retries.
+          if (result === true || result === 'renamed') {
             data!.named = true;
+          } else if (result === 'failed') {
+            data!.autoRenameBlocked = true;
           }
         })
-        .catch(() => undefined)
+        .catch(() => {
+          // Unexpected callback throw: treat like a permanent failure so we do
+          // not spam provider attempts on every subsequent shell command.
+          data!.autoRenameBlocked = true;
+        })
         .finally(() => {
           data!.namingInProgress = false;
         });
@@ -155,7 +180,12 @@ export class TerminalTracker {
   addCommand(terminal: vscode.Terminal, command: string) {
     let data = this.terminalDataMap.get(terminal);
     if (!data) {
-      data = { commands: [], named: false, namingInProgress: false };
+      data = {
+        commands: [],
+        named: false,
+        namingInProgress: false,
+        autoRenameBlocked: false
+      };
       this.terminalDataMap.set(terminal, data);
     }
 
@@ -180,6 +210,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = false;
+      data.autoRenameBlocked = false;
     }
   }
 
@@ -190,6 +221,7 @@ export class TerminalTracker {
     const data = this.terminalDataMap.get(terminal);
     if (data) {
       data.named = true;
+      data.autoRenameBlocked = false;
     }
   }
 
