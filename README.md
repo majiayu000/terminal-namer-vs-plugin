@@ -65,7 +65,7 @@ Non-secret options can still be set via VS Code settings:
 }
 ```
 
-Legacy plaintext settings (`terminalAiNamer.openrouterApiKey`, `openaiApiKey`, `claudeApiKey`) are migrated into SecretStorage automatically and then cleared. Prefer the sidebar for new keys.
+Legacy plaintext settings (`terminalAiNamer.openrouterApiKey`, `openaiApiKey`, `claudeApiKey`) are migrated into SecretStorage automatically. Workspace- and folder-scoped plaintext values are cleared after migration. Global (user) plaintext values are left in place so Settings Sync does not wipe other installations before they migrate — remove them manually once every machine has activated this version, or re-enter keys via the sidebar. Prefer the sidebar for new keys.
 
 ## Configuration Options
 

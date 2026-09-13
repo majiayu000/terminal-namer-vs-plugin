@@ -143,6 +143,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
 
     const config = vscode.workspace.getConfiguration('terminalAiNamer');
     const rejected: string[] = [];
+    const updateFailures: string[] = [];
     let providerForKey: ProviderType | undefined;
 
     for (const [key, value] of Object.entries(settings)) {
@@ -162,7 +163,14 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         providerForKey = value as ProviderType;
       }
 
-      await config.update(settingKey, value, vscode.ConfigurationTarget.Global);
+      // Isolate non-secret update failures so a read-only Global settings store
+      // cannot abort the handler before SecretStorage credential writes.
+      try {
+        await config.update(settingKey, value, vscode.ConfigurationTarget.Global);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        updateFailures.push(`${key} (${detail})`);
+      }
     }
 
     if (rejected.length > 0) {
@@ -172,6 +180,7 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     // API keys never go through configuration — only SecretStorage.
+    let apiKeySaved = false;
     if (typeof message.apiKey === 'string') {
       const provider =
         providerForKey ??
@@ -181,12 +190,20 @@ export class SettingsSidebarProvider implements vscode.WebviewViewProvider {
         vscode.window.showWarningMessage('当前提供商不使用 API Key');
       } else if (message.apiKey.length === 0) {
         await clearApiKey(this._secrets, provider);
+        apiKeySaved = true;
       } else {
         await setApiKey(this._secrets, provider, message.apiKey);
+        apiKeySaved = true;
       }
     }
 
-    vscode.window.showInformationMessage('设置已保存');
+    if (updateFailures.length > 0) {
+      vscode.window.showWarningMessage(
+        `部分设置未能写入配置${apiKeySaved ? '（API Key 已保存到 SecretStorage）' : ''}: ${updateFailures.join('; ')}`
+      );
+    } else {
+      vscode.window.showInformationMessage('设置已保存');
+    }
     await this._sendCurrentSettings();
   }
 
