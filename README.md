@@ -124,7 +124,7 @@ Or configure via VS Code settings:
 
 ## Privacy
 
-- Only sends terminal commands to your configured AI service
+- Sends terminal commands and, when available, the terminal's current directory name (last path component) to your configured AI service
 - Does not collect any user data
 - All settings stored locally
 
